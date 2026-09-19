@@ -2569,141 +2569,92 @@ def ask_data_agent(
 
 
 # ============================================================
-# 13. MULTI-CHAT SESSION STATE
+# 13. MULTI-CHAT SESSION STATE (LƯU TRỮ VĨNH VIỄN)
 # ============================================================
+HISTORY_FILE = "chat_history_v7.json"
+
+def load_chats():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return {}
+    return {}
+
+def save_chats():
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(st.session_state.chats, f, ensure_ascii=False, indent=4)
 
 def create_new_chat():
-    chat_id = str(
-        uuid.uuid4()
-    )
-
-    st.session_state.chats[
-        chat_id
-    ] = {
+    chat_id = str(uuid.uuid4())
+    st.session_state.chats[chat_id] = {
         "title": "New chat",
         "messages": [],
     }
-
-    st.session_state.current_chat_id = (
-        chat_id
-    )
-
+    st.session_state.current_chat_id = chat_id
+    save_chats()
 
 def delete_chat(chat_id):
-    if (
-        chat_id
-        not in st.session_state.chats
-    ):
-        return
-
-    del st.session_state.chats[
-        chat_id
-    ]
-
+    if chat_id in st.session_state.chats:
+        del st.session_state.chats[chat_id]
+    
     if not st.session_state.chats:
         create_new_chat()
-        return
-
-    if (
-        st.session_state.current_chat_id
-        == chat_id
-    ):
-        st.session_state.current_chat_id = (
-            next(
-                reversed(
-                    st.session_state.chats
-                )
-            )
-        )
-
+    elif st.session_state.current_chat_id == chat_id:
+        st.session_state.current_chat_id = next(reversed(st.session_state.chats))
+    
+    save_chats()
 
 if "chats" not in st.session_state:
-    st.session_state.chats = {}
+    st.session_state.chats = load_chats()
 
-if (
-    "current_chat_id"
-    not in st.session_state
-    or st.session_state.current_chat_id
-    not in st.session_state.chats
-):
+if not st.session_state.chats:
     create_new_chat()
-
+elif "current_chat_id" not in st.session_state or st.session_state.current_chat_id not in st.session_state.chats:
+    st.session_state.current_chat_id = list(st.session_state.chats.keys())[-1]
 
 # ============================================================
-# 14. SIDEBAR — NEW CHAT + HISTORY + DELETE
+# 14. SIDEBAR — GIAO DIỆN CHUẨN GEMINI
 # ============================================================
+st.sidebar.title("💬 Lịch sử trò chuyện")
 
-st.sidebar.title("💬 Chats")
-
-if st.sidebar.button(
-    "＋ New chat",
-    use_container_width=True,
-    type="primary",
-):
-    create_new_chat()
-    st.rerun()
+col1, col2 = st.sidebar.columns([1, 1])
+with col1:
+    if st.button("➕ Chat Mới", use_container_width=True, type="primary"):
+        create_new_chat()
+        st.rerun()
+with col2:
+    with st.popover("⚙️ Cấu hình", use_container_width=True):
+        st.markdown("**Kết nối MySQL Workbench**")
+        st.caption("💡 Để trống các ô này, Agent sẽ tự động phân tích file `ecommerce_clean.db`.")
+        st.text_input("Host (VD: localhost):", key="db_host")
+        st.text_input("Username (VD: root):", key="db_user")
+        st.text_input("Password:", type="password", key="db_pass")
+        st.text_input("Database Name:", key="db_name")
 
 st.sidebar.markdown("---")
-st.sidebar.caption(
-    "Conversation history"
-)
+st.sidebar.caption("Các cuộc trò chuyện gần đây")
 
-for chat_id, chat in reversed(
-    list(
-        st.session_state.chats.items()
-    )
-):
-    cols = st.sidebar.columns(
-        [0.82, 0.18]
-    )
+# Hiển thị danh sách Chat (Active/Inactive)
+for chat_id, chat_data in reversed(list(st.session_state.chats.items())):
+    cols = st.sidebar.columns([0.85, 0.15])
+    is_current = (chat_id == st.session_state.current_chat_id)
+    title = chat_data.get("title", "New chat")
 
-    is_current = (
-        chat_id
-        == st.session_state.current_chat_id
-    )
-
-    title = chat.get(
-        "title",
-        "New chat",
-    )
-
-    label = (
-        f"● {title}"
-        if is_current
-        else title
-    )
+    label = f"👉 {title}" if is_current else f"💬 {title}"
 
     with cols[0]:
-        if st.button(
-            label,
-            key=f"open_{chat_id}",
-            use_container_width=True,
-        ):
-            st.session_state.current_chat_id = (
-                chat_id
-            )
+        if st.button(label, key=f"open_{chat_id}", use_container_width=True):
+            st.session_state.current_chat_id = chat_id
             st.rerun()
-
     with cols[1]:
-        if st.button(
-            "🗑️",
-            key=f"delete_{chat_id}",
-            help="Delete chat",
-            use_container_width=True,
-        ):
+        if st.button("🗑️", key=f"del_{chat_id}", help="Xóa chat này"):
             delete_chat(chat_id)
             st.rerun()
 
-
-current_chat = (
-    st.session_state.chats[
-        st.session_state.current_chat_id
-    ]
-)
-
-history = current_chat[
-    "messages"
-]
+current_chat = st.session_state.chats[st.session_state.current_chat_id]
+history = current_chat["messages"]
 
 
 # ============================================================
