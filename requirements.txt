@@ -6,3 +6,5 @@ langchain
 langchain-groq
 groq
 langchain-google-genai
+sqlalchemy
+pymysql
