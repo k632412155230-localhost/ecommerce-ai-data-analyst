@@ -206,7 +206,7 @@ SCHEMA_CONTEXT = build_schema_context()
 
 
 # ============================================================
-# 4. LLM (GEMINI 3.6 FLASH)
+# 4. LLM (GEMINI 1.5 FLASH)
 # ============================================================
 
 @st.cache_resource(show_spinner=False)
