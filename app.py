@@ -212,7 +212,7 @@ SCHEMA_CONTEXT = build_schema_context()
 @st.cache_resource(show_spinner=False)
 def get_llm(api_key: str):
     return ChatGoogleGenerativeAI(
-        model="gemini-3.6-flash",
+        model="gemini-1.5-flash",
         google_api_key=api_key,
         temperature=0,
     )
