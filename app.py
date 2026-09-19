@@ -54,7 +54,7 @@ class Presentation(BaseModel):
     chart: ChartSpec = Field(description="Cấu hình biểu đồ Plotly minh họa cho Insight.")
 
 # ==========================================
-# 4. BỘ NÃO XỬ LÝ (AGENT - GEMINI 3.6 FLASH & MYSQL)
+# 4. BỘ NÃO XỬ LÝ (AGENT - GEMINI 1.5 FLASH & MYSQL)
 # ==========================================
 SYSTEM_PROMPT = f"""Bạn là Giám đốc Vận hành (COO) & Kỹ sư Dữ liệu cấp cao tại một E-commerce Marketplace.
 
@@ -70,9 +70,8 @@ QUY TẮC BẮT BUỘC:
 4. BIỂU ĐỒ: Cấu hình ChartSpec hợp lý. Tên cột x, y phải khớp 100% với tên cột bạn SELECT trong câu SQL.
 """
 
-def analyze_data(question, api_key):
-    # Sử dụng đúng phiên bản Gemini 3.6 Flash
-    llm = ChatGoogleGenerativeAI(model="gemini-3.6-flash", google_api_key=api_key, temperature=0.1)
+def analyze_data(question, api_key, db_host, db_port, db_user, db_pass, db_name):
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0.1)
     structured_llm = llm.with_structured_output(Presentation)
     
     messages = [
@@ -88,14 +87,10 @@ def analyze_data(question, api_key):
             if any(kw in result.sql_query.upper() for kw in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER"]):
                 raise Exception("Phát hiện mã SQL thay đổi dữ liệu bị cấm!")
                 
-            # Kết nối MySQL bằng thông tin bảo mật
-            db_user = st.secrets["DB_USER"]
-            db_pass = st.secrets["DB_PASSWORD"]
-            db_host = st.secrets["DB_HOST"]
-            db_port = st.secrets.get("DB_PORT", 3306)
-            db_name = st.secrets["DB_NAME"]
+            # Tạo chuỗi kết nối động dựa trên thông tin truyền vào
+            connection_string = f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+            engine = create_engine(connection_string)
             
-            engine = create_engine(f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}")
             df = pd.read_sql_query(result.sql_query, engine)
             data = df.to_dict(orient="records")
             
@@ -123,10 +118,23 @@ with st.sidebar:
     st.markdown("### 🔥 Group 3 - TINE313")
     st.markdown("---")
     
-    if st.button("➕ Chat Mới", type="primary", use_container_width=True):
-        st.session_state.current_session_id = str(uuid.uuid4())
-        st.session_state.all_chats[st.session_state.current_session_id] = []
-        st.rerun()
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("➕ Chat Mới", type="primary", use_container_width=True):
+            st.session_state.current_session_id = str(uuid.uuid4())
+            st.session_state.all_chats[st.session_state.current_session_id] = []
+            st.rerun()
+    with col2:
+        with st.popover("⚙️ Cấu hình"):
+            st.markdown("**1. Cấu hình AI (Gemini)**")
+            api_key_input = st.text_input("API Key:", type="password", placeholder="Để trống dùng key mặc định")
+            
+            st.markdown("**2. Kết nối MySQL**")
+            db_host_input = st.text_input("Host (VD: 127.0.0.1):", placeholder="Để trống dùng cấu hình mặc định")
+            db_port_input = st.text_input("Port:", value="3306")
+            db_user_input = st.text_input("User (VD: root):", placeholder="Để trống dùng cấu hình mặc định")
+            db_pass_input = st.text_input("Password:", type="password", placeholder="Nhập mật khẩu MySQL")
+            db_name_input = st.text_input("Database Name:", placeholder="Để trống dùng cấu hình mặc định")
 
     st.markdown("---")
     st.markdown("📂 **Danh mục Bảng Dữ liệu (MySQL)**")
@@ -163,11 +171,20 @@ for msg in st.session_state.all_chats[st.session_state.current_session_id]:
         st.markdown(msg["content"])
 
 if prompt := st.chat_input("VD: Cho tôi insight về doanh thu theo từng tiểu bang..."):
-    # Tự động lấy API Key từ két sắt (Secrets) của Streamlit
-    try:
-        api_key = st.secrets["GEMINI_API_KEY"]
-    except KeyError:
-        st.error("⚠️ Lỗi: Chưa cấu hình GEMINI_API_KEY trong mục Settings > Secrets của Streamlit Cloud!")
+    # HỆ THỐNG ƯU TIÊN: Lấy thông tin từ giao diện trước, nếu trống thì tìm trong Streamlit Secrets
+    active_api_key = api_key_input if api_key_input else st.secrets.get("GEMINI_API_KEY")
+    active_db_host = db_host_input if db_host_input else st.secrets.get("DB_HOST")
+    active_db_port = db_port_input if db_port_input else st.secrets.get("DB_PORT", 3306)
+    active_db_user = db_user_input if db_user_input else st.secrets.get("DB_USER")
+    active_db_pass = db_pass_input if db_pass_input else st.secrets.get("DB_PASSWORD", "")
+    active_db_name = db_name_input if db_name_input else st.secrets.get("DB_NAME")
+
+    # Kiểm tra điều kiện bắt buộc
+    if not active_api_key:
+        st.error("⚠️ Thiếu API Key! Vui lòng nhập trong mục Cấu hình hoặc cài đặt Secrets.")
+        st.stop()
+    if not active_db_host or not active_db_user or not active_db_name:
+        st.error("⚠️ Thiếu thông tin MySQL (Host, User hoặc DB Name)! Vui lòng điền ở mục Cấu hình hoặc cài đặt Secrets.")
         st.stop()
 
     st.session_state.all_chats[st.session_state.current_session_id].append({"role": "user", "content": prompt})
@@ -175,12 +192,21 @@ if prompt := st.chat_input("VD: Cho tôi insight về doanh thu theo từng ti�
         st.markdown(prompt)
         
     with st.chat_message("assistant"):
-        with st.spinner(f"Agent đang xử lý bằng gemini-3.6-flash & truy vấn MySQL..."):
+        with st.spinner("Agent đang xử lý logic và truy vấn MySQL..."):
             try:
-                result_obj, data = analyze_data(prompt, api_key)
+                # Truyền toàn bộ thông tin kết nối động vào hàm
+                result_obj, data = analyze_data(
+                    prompt, 
+                    active_api_key, 
+                    active_db_host, 
+                    active_db_port, 
+                    active_db_user, 
+                    active_db_pass, 
+                    active_db_name
+                )
                 
                 st.markdown(result_obj.answer)
-                st.markdown("💡 **Hệ thống AI đã bóc tách thành công các Insight chuyên sâu từ CSDL.**")
+                st.markdown("💡 **Hệ thống AI đã bóc tách thành công các Insight chuyên sâu từ CSDL MySQL.**")
                 
                 tab1, tab2, tab3 = st.tabs(["📊 Insight & Biểu đồ", "💡 Chiến lược", "⚙️ Dữ liệu & SQL"])
                 
