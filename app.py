@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 import json
 import os
 import uuid
@@ -7,14 +8,15 @@ import plotly.express as px
 from pathlib import Path
 from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
-from sqlalchemy import create_engine
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 # ==========================================
-# 1. ĐỌC CODEBOOK (TỪ ĐIỂN DỮ LIỆU)
+# 1. CẤU HÌNH ĐƯỜNG DẪN KHỚP VỚI GITHUB REPO
 # ==========================================
+DB_PATH = Path("data/processed/ecommerce_clean.db").resolve()
+
 CODEBOOK_PATH = Path("ecommerce_agent_codebook.md")
 try:
     CODEBOOK_TEXT = CODEBOOK_PATH.read_text(encoding="utf-8")
@@ -45,7 +47,7 @@ class ChartSpec(BaseModel):
 
 class Presentation(BaseModel):
     answer: str = Field(description="Câu trả lời giao tiếp tự nhiên, thân thiện với người dùng.")
-    sql_query: str = Field(description="Câu lệnh MySQL hợp lệ. LUÔN dùng DISTINCT khi đếm ID.")
+    sql_query: str = Field(description="Câu lệnh SQL hợp lệ. LUÔN dùng DISTINCT khi đếm ID.")
     basic_insights: List[str] = Field(description="Insight cơ bản: Đọc vị các con số tổng quan, xu hướng chính.")
     deep_insights: List[str] = Field(description="Insight chuyên sâu/Nghịch lý: Phát hiện điểm bất thường, rủi ro ngầm, hoặc cơ hội ẩn giấu.")
     short_term_strategy: List[str] = Field(description="Chiến lược Ngắn hạn (Cấp bách) dựa trên dữ liệu.")
@@ -54,14 +56,12 @@ class Presentation(BaseModel):
     chart: ChartSpec = Field(description="Cấu hình biểu đồ Plotly minh họa cho Insight.")
 
 # ==========================================
-# 4. BỘ NÃO XỬ LÝ (AGENT - GEMINI 1.5 FLASH & MYSQL)
+# 4. BỘ NÃO XỬ LÝ (AGENT)
 # ==========================================
 SYSTEM_PROMPT = f"""Bạn là Giám đốc Vận hành (COO) & Kỹ sư Dữ liệu cấp cao tại một E-commerce Marketplace.
 
 ĐÂY LÀ TỪ ĐIỂN DỮ LIỆU CỦA HỆ THỐNG (CODEBOOK):
 {CODEBOOK_TEXT}
-
-CƠ SỞ DỮ LIỆU: Hệ thống sử dụng CSDL MySQL. Mọi câu lệnh truy vấn phải tuân thủ nghiêm ngặt cú pháp của MySQL.
 
 QUY TẮC BẮT BUỘC:
 1. SỰ THẬT DỮ LIỆU: LUÔN viết SQL để lấy số liệu thực. Không tự bịa số liệu. Tuân thủ định nghĩa doanh thu trong Codebook.
@@ -70,7 +70,7 @@ QUY TẮC BẮT BUỘC:
 4. BIỂU ĐỒ: Cấu hình ChartSpec hợp lý. Tên cột x, y phải khớp 100% với tên cột bạn SELECT trong câu SQL.
 """
 
-def analyze_data(question, api_key, db_host, db_port, db_user, db_pass, db_name):
+def analyze_data(question, api_key):
     llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0.1)
     structured_llm = llm.with_structured_output(Presentation)
     
@@ -87,15 +87,12 @@ def analyze_data(question, api_key, db_host, db_port, db_user, db_pass, db_name)
             if any(kw in result.sql_query.upper() for kw in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER"]):
                 raise Exception("Phát hiện mã SQL thay đổi dữ liệu bị cấm!")
                 
-            # Tạo chuỗi kết nối động dựa trên thông tin truyền vào
-            connection_string = f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
-            engine = create_engine(connection_string)
-            
-            df = pd.read_sql_query(result.sql_query, engine)
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql_query(result.sql_query, conn)
             data = df.to_dict(orient="records")
-            
+            conn.close()
         except Exception as e:
-            result.answer += f"\n\n(⚠️ Lỗi SQL / MySQL: {e})"
+            result.answer += f"\n\n(⚠️ Lỗi SQL: {e})"
             
     return result, data
 
@@ -126,18 +123,11 @@ with st.sidebar:
             st.rerun()
     with col2:
         with st.popover("⚙️ Cấu hình"):
-            st.markdown("**1. Cấu hình AI (Gemini)**")
-            api_key_input = st.text_input("API Key:", type="password", placeholder="Để trống dùng key mặc định")
-            
-            st.markdown("**2. Kết nối MySQL**")
-            db_host_input = st.text_input("Host (VD: 127.0.0.1):", placeholder="Để trống dùng cấu hình mặc định")
-            db_port_input = st.text_input("Port:", value="3306")
-            db_user_input = st.text_input("User (VD: root):", placeholder="Để trống dùng cấu hình mặc định")
-            db_pass_input = st.text_input("Password:", type="password", placeholder="Nhập mật khẩu MySQL")
-            db_name_input = st.text_input("Database Name:", placeholder="Để trống dùng cấu hình mặc định")
+            api_key = st.text_input("Gemini API Key:", type="password")
+            st.markdown("[👉 Lấy API Key tại đây](https://aistudio.google.com/app/apikey)")
 
     st.markdown("---")
-    st.markdown("📂 **Danh mục Bảng Dữ liệu (MySQL)**")
+    st.markdown("📂 **Danh mục Bảng Dữ liệu**")
     with st.expander("Hiển thị chi tiết bảng"):
         st.markdown("""
         - **df_customers** (Khách hàng)
@@ -171,94 +161,75 @@ for msg in st.session_state.all_chats[st.session_state.current_session_id]:
         st.markdown(msg["content"])
 
 if prompt := st.chat_input("VD: Cho tôi insight về doanh thu theo từng tiểu bang..."):
-    # HỆ THỐNG ƯU TIÊN: Lấy thông tin từ giao diện trước, nếu trống thì tìm trong Streamlit Secrets
-    active_api_key = api_key_input if api_key_input else st.secrets.get("GEMINI_API_KEY")
-    active_db_host = db_host_input if db_host_input else st.secrets.get("DB_HOST")
-    active_db_port = db_port_input if db_port_input else st.secrets.get("DB_PORT", 3306)
-    active_db_user = db_user_input if db_user_input else st.secrets.get("DB_USER")
-    active_db_pass = db_pass_input if db_pass_input else st.secrets.get("DB_PASSWORD", "")
-    active_db_name = db_name_input if db_name_input else st.secrets.get("DB_NAME")
-
-    # Kiểm tra điều kiện bắt buộc
-    if not active_api_key:
-        st.error("⚠️ Thiếu API Key! Vui lòng nhập trong mục Cấu hình hoặc cài đặt Secrets.")
-        st.stop()
-    if not active_db_host or not active_db_user or not active_db_name:
-        st.error("⚠️ Thiếu thông tin MySQL (Host, User hoặc DB Name)! Vui lòng điền ở mục Cấu hình hoặc cài đặt Secrets.")
-        st.stop()
-
-    st.session_state.all_chats[st.session_state.current_session_id].append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-        
-    with st.chat_message("assistant"):
-        with st.spinner("Agent đang xử lý logic và truy vấn MySQL..."):
-            try:
-                # Truyền toàn bộ thông tin kết nối động vào hàm
-                result_obj, data = analyze_data(
-                    prompt, 
-                    active_api_key, 
-                    active_db_host, 
-                    active_db_port, 
-                    active_db_user, 
-                    active_db_pass, 
-                    active_db_name
-                )
-                
-                st.markdown(result_obj.answer)
-                st.markdown("💡 **Hệ thống AI đã bóc tách thành công các Insight chuyên sâu từ CSDL MySQL.**")
-                
-                tab1, tab2, tab3 = st.tabs(["📊 Insight & Biểu đồ", "💡 Chiến lược", "⚙️ Dữ liệu & SQL"])
-                
-                with tab1:
-                    st.markdown("### 1. Insight Cơ bản")
-                    for ins in result_obj.basic_insights:
-                        st.write(f"🔹 {ins}")
+    if not api_key:
+        st.error("⚠️ Vui lòng nhập Gemini API Key ở thanh Cấu hình bên trái!")
+    else:
+        st.session_state.all_chats[st.session_state.current_session_id].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+            
+        with st.chat_message("assistant"):
+            with st.spinner("Agent đang đọc Codebook, chạy SQL và tổng hợp Insight..."):
+                try:
+                    if not os.path.exists(DB_PATH):
+                        st.error(f"Không tìm thấy file Database tại: {DB_PATH}. Hãy chắc chắn thư mục data/processed/ chứa file ecommerce_clean.db.")
+                    else:
+                        result_obj, data = analyze_data(prompt, api_key)
                         
-                    st.markdown("### 2. Insight Chuyên sâu & Nghịch lý")
-                    for ins in result_obj.deep_insights:
-                        st.write(f"⚠️ **{ins}**")
-                    
-                    if data and result_obj.chart.type != "none":
-                        st.markdown("---")
-                        df_chart = pd.DataFrame(data)
-                        c = result_obj.chart
-                        try:
-                            if c.type == "bar":
-                                st.plotly_chart(px.bar(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
-                            elif c.type == "pie":
-                                st.plotly_chart(px.pie(df_chart, names=c.x, values=c.y, title=c.title), use_container_width=True)
-                            elif c.type == "line":
-                                st.plotly_chart(px.line(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
-                            elif c.type == "scatter":
-                                st.plotly_chart(px.scatter(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
-                        except Exception as e:
-                            st.warning(f"Cấu trúc biểu đồ AI đề xuất chưa khớp với dữ liệu: {e}")
+                        st.markdown(result_obj.answer)
+                        st.markdown("💡 **Hệ thống AI đã bóc tách thành công các Insight chuyên sâu từ CSDL.**")
+                        
+                        tab1, tab2, tab3 = st.tabs(["📊 Insight & Biểu đồ", "💡 Chiến lược", "⚙️ Dữ liệu & SQL"])
+                        
+                        with tab1:
+                            st.markdown("### 1. Insight Cơ bản")
+                            for ins in result_obj.basic_insights:
+                                st.write(f"🔹 {ins}")
+                                
+                            st.markdown("### 2. Insight Chuyên sâu & Nghịch lý")
+                            for ins in result_obj.deep_insights:
+                                st.write(f"⚠️ **{ins}**")
                             
-                with tab2:
-                    st.markdown("### 🚀 Chiến lược Ngắn hạn (Cấp bách)")
-                    for strat in result_obj.short_term_strategy:
-                        st.write(f"⚡ {strat}")
+                            if data and result_obj.chart.type != "none":
+                                st.markdown("---")
+                                df_chart = pd.DataFrame(data)
+                                c = result_obj.chart
+                                try:
+                                    if c.type == "bar":
+                                        st.plotly_chart(px.bar(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
+                                    elif c.type == "pie":
+                                        st.plotly_chart(px.pie(df_chart, names=c.x, values=c.y, title=c.title), use_container_width=True)
+                                    elif c.type == "line":
+                                        st.plotly_chart(px.line(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
+                                    elif c.type == "scatter":
+                                        st.plotly_chart(px.scatter(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Cấu trúc biểu đồ AI đề xuất chưa khớp với dữ liệu: {e}")
+                                    
+                        with tab2:
+                            st.markdown("### 🚀 Chiến lược Ngắn hạn (Cấp bách)")
+                            for strat in result_obj.short_term_strategy:
+                                st.write(f"⚡ {strat}")
+                                
+                            st.markdown("### 📈 Chiến lược Trung hạn")
+                            for strat in result_obj.medium_term_strategy:
+                                st.write(f"🎯 {strat}")
+                                
+                            st.markdown("### 🌍 Chiến lược Dài hạn")
+                            for strat in result_obj.long_term_strategy:
+                                st.write(f"🌟 {strat}")
+                                
+                        with tab3:
+                            st.markdown("**Câu lệnh SQL đã thực thi:**")
+                            st.code(result_obj.sql_query, language="sql")
+                            if data:
+                                st.markdown("**🗄️ Bảng kết quả (Data Preview):**")
+                                st.dataframe(pd.DataFrame(data), use_container_width=True)
                         
-                    st.markdown("### 📈 Chiến lược Trung hạn")
-                    for strat in result_obj.medium_term_strategy:
-                        st.write(f"🎯 {strat}")
+                        st.session_state.all_chats[st.session_state.current_session_id].append(
+                            {"role": "assistant", "content": result_obj.answer + "\n\n*(Xem chi tiết Insight, Chiến lược và Biểu đồ tại các Tab)*"}
+                        )
+                        save_history(st.session_state.all_chats)
                         
-                    st.markdown("### 🌍 Chiến lược Dài hạn")
-                    for strat in result_obj.long_term_strategy:
-                        st.write(f"🌟 {strat}")
-                        
-                with tab3:
-                    st.markdown("**Câu lệnh SQL đã thực thi:**")
-                    st.code(result_obj.sql_query, language="sql")
-                    if data:
-                        st.markdown("**🗄️ Bảng kết quả (Data Preview):**")
-                        st.dataframe(pd.DataFrame(data), use_container_width=True)
-                
-                st.session_state.all_chats[st.session_state.current_session_id].append(
-                    {"role": "assistant", "content": result_obj.answer + "\n\n*(Xem chi tiết Insight, Chiến lược và Biểu đồ tại các Tab)*"}
-                )
-                save_history(st.session_state.all_chats)
-                
-            except Exception as e:
-                st.error(f"Lỗi hệ thống: {e}")
+                except Exception as e:
+                    st.error(f"Lỗi hệ thống: {e}")
