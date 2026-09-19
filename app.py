@@ -1,878 +1,235 @@
-
-import re
-import json
+import streamlit as st
+import pandas as pd
 import sqlite3
+import json
+import os
+import uuid
+import plotly.express as px
 from pathlib import Path
 from typing import List, Optional, Literal
-
-import pandas as pd
-import plotly.express as px
-import streamlit as st
-
 from pydantic import BaseModel, Field
-from langchain.tools import tool
-from langchain.agents import create_agent
-from langchain_groq import ChatGroq
 
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
 
-# ============================================================
-# 1. PATHS
-# ============================================================
-
+# ==========================================
+# 1. CẤU HÌNH ĐƯỜNG DẪN KHỚP VỚI GITHUB REPO
+# ==========================================
 DB_PATH = Path("data/processed/ecommerce_clean.db").resolve()
+
 CODEBOOK_PATH = Path("ecommerce_agent_codebook.md")
-
-codebook_text = CODEBOOK_PATH.read_text(encoding="utf-8")
-
-
-# ============================================================
-# 2. SQL SAFETY
-# ============================================================
-
-FORBIDDEN_SQL = {
-    "INSERT", "UPDATE", "DELETE", "DROP",
-    "ALTER", "CREATE", "REPLACE",
-    "ATTACH", "DETACH", "VACUUM",
-    "REINDEX", "PRAGMA"
-}
-
-
-def validate_readonly_sql(sql: str):
-    if not isinstance(sql, str) or not sql.strip():
-        return False, "SQL query is empty."
-
-    cleaned = sql.strip()
-
-    first_word = cleaned.split()[0].upper()
-
-    if first_word not in {"SELECT", "WITH"}:
-        return False, "Only SELECT or WITH queries are allowed."
-
-    for keyword in FORBIDDEN_SQL:
-        if re.search(rf"\b{keyword}\b", cleaned, flags=re.IGNORECASE):
-            return False, f"Forbidden SQL keyword: {keyword}"
-
-    without_last_semicolon = cleaned.rstrip(";")
-
-    if ";" in without_last_semicolon:
-        return False, "Multiple SQL statements are not allowed."
-
-    return True, "OK"
-
-
-def validate_sql_query(sql: str):
-    safe, reason = validate_readonly_sql(sql)
-
-    if not safe:
-        return {
-            "status": "BLOCKED",
-            "messages": [reason]
-        }
-
-    normalized = " ".join(sql.lower().split())
-
-    # Does SQL actually compile?
-    try:
-        db_uri = f"file:{DB_PATH}?mode=ro"
-
-        with sqlite3.connect(db_uri, uri=True) as conn:
-            conn.execute(
-                "EXPLAIN QUERY PLAN " + sql
-            ).fetchall()
-
-    except Exception as e:
-        return {
-            "status": "BLOCKED",
-            "messages": [
-                f"SQL does not compile: {type(e).__name__}: {e}"
-            ]
-        }
-
-    warnings = []
-
-    if re.search(
-        r"\bsum\s*\(\s*(?:\w+\.)?price\s*\)",
-        normalized
-    ):
-        warnings.append(
-            "SUM(price) is the sum of prices on retained "
-            "order-item rows, not guaranteed complete order revenue."
-        )
-
-    if re.search(
-        r"\b(sum|avg)\s*\(\s*(?:\w+\.)?payment_value\s*\)",
-        normalized
-    ):
-        warnings.append(
-            "payment_value comes from one retained payment row "
-            "per order and is not guaranteed complete order revenue."
-        )
-
-    if (
-        "product_category_name" in normalized
-        and "payment_value" in normalized
-    ):
-        warnings.append(
-            "Category × payment_value is high-risk because category "
-            "belongs to the retained product row."
-        )
-
-    if (
-        "order_delivered_timestamp" in normalized
-        and "is not null" not in normalized
-    ):
-        warnings.append(
-            "Delivery analysis should normally require "
-            "order_delivered_timestamp IS NOT NULL."
-        )
-
-    if warnings:
-        return {
-            "status": "WARNING",
-            "messages": warnings
-        }
-
-    return {
-        "status": "SAFE",
-        "messages": ["SQL passed validation."]
-    }
-
-
-# ============================================================
-# 3. TOOLS
-# ============================================================
-
-@tool
-def list_tables() -> str:
-    """List all tables and views in the e-commerce database."""
-
-    db_uri = f"file:{DB_PATH}?mode=ro"
-
-    with sqlite3.connect(db_uri, uri=True) as conn:
-        rows = conn.execute("""
-            SELECT name, type
-            FROM sqlite_master
-            WHERE type IN ('table', 'view')
-            ORDER BY type, name;
-        """).fetchall()
-
-    return "\n".join(
-        f"{name} ({kind})"
-        for name, kind in rows
-    )
-
-
-@tool
-def get_schema(table_name: str) -> str:
-    """Return schema for a table or view."""
-
-    db_uri = f"file:{DB_PATH}?mode=ro"
-
-    with sqlite3.connect(db_uri, uri=True) as conn:
-        row = conn.execute("""
-            SELECT sql
-            FROM sqlite_master
-            WHERE name = ?
-            AND type IN ('table', 'view');
-        """, (table_name,)).fetchone()
-
-    if row is None:
-        return f"{table_name} does not exist."
-
-    return row[0]
-
-
-@tool
-def validate_sql(sql: str) -> str:
-    """Validate SQL before execution. Always call this before execute_sql."""
-
-    result = validate_sql_query(sql)
-
-    text = [f"STATUS: {result['status']}"]
-
-    for message in result["messages"]:
-        text.append(f"- {message}")
-
-    return "\n".join(text)
-
-
-@tool
-def execute_sql(sql: str) -> str:
-    """Execute validated read-only SQL against the database."""
-
-    validation = validate_sql_query(sql)
-
-    if validation["status"] == "BLOCKED":
-        return (
-            "SQL BLOCKED: "
-            + " ".join(validation["messages"])
-        )
-
-    db_uri = f"file:{DB_PATH}?mode=ro"
-
-    try:
-        with sqlite3.connect(db_uri, uri=True) as conn:
-            conn.row_factory = sqlite3.Row
-
-            cursor = conn.execute(sql)
-
-            rows = cursor.fetchmany(51)
-
-            columns = [
-                x[0] for x in cursor.description
-            ]
-
-        rows = rows[:50]
-
-        result = [
-            {col: row[col] for col in columns}
-            for row in rows
-        ]
-
-        return json.dumps(
-            result,
-            ensure_ascii=False,
-            default=str
-        )
-
-    except Exception as e:
-        return f"SQL ERROR: {type(e).__name__}: {e}"
-
-
-TOOLS = [
-    list_tables,
-    get_schema,
-    validate_sql,
-    execute_sql
-]
-
-
-# ============================================================
-# 4. SYSTEM PROMPT
-# ============================================================
-
-SYSTEM_PROMPT = f"""
-You are an AI Data Analyst for one specific e-commerce SQLite database.
-
-You have tools for:
-- listing tables,
-- reading schemas,
-- validating SQL,
-- executing SQL.
-
-CORE RULES:
-
-1. Never invent numerical values.
-2. Every dataset number must come from executed SQL.
-3. Always validate new SQL before executing it.
-4. If SQL is BLOCKED, fix it before execution.
-5. Only use read-only SQL.
-6. If SQL returns an error, diagnose and retry.
-7. Do not claim correlation is causation.
-
-SEMANTIC RULES:
-
-- orders has one row per order.
-- order_items contains one retained row per order.
-- payments contains one retained payment row per order.
-- products contains one metadata row per product_id.
-- customers contains one transformed customer row.
-
-UNSUPPORTED:
-- basket size
-- original number of items per order
-- original number of payments per order
-- repeat-customer rate / retention
-
-MONEY RULES:
-
-If user says "revenue" without defining it,
-DO NOT choose automatically.
-
-Ask whether they mean:
-
-A. SUM(price)
-B. SUM(payment_value)
-
-Never invent a currency.
-Do not add $, €, R$, £, etc.
-
-SUM(price) means:
-sum of price on retained order-item rows.
-
-SUM(payment_value) means:
-sum of retained payment values.
-
-Do not automatically describe either one as true complete order revenue.
-
-PRODUCT RULE:
-
-product_category_name belongs to the retained product row.
-Do not imply it represents every item originally contained in the order.
-
-DELIVERY RULE:
-
-For delivery duration/performance:
-- normally use delivered orders
-- require order_delivered_timestamp IS NOT NULL
-
-DATA vs INSIGHT vs STRATEGY:
-
-DATA = SQL evidence.
-INSIGHT = interpretation of evidence.
-STRATEGY = possible business action supported by evidence.
-
-Do not propose a strong strategy if the available analysis does not support it.
-
-CHART RULE:
-
-If the user requests a chart, graph, plot, or visualization:
-- query the data needed for the chart,
-- DO NOT write chart JSON,
-- DO NOT write a chart specification in the textual answer,
-- the Streamlit application will render the chart from the SQL result.
-
-DATABASE CODEBOOK:
-
-{codebook_text}
-
-DATABASE CODEBOOK:
-
-{codebook_text}
-"""
-
-
-# ============================================================
-# 5. STRUCTURED OUTPUT
-# ============================================================
-
+try:
+    CODEBOOK_TEXT = CODEBOOK_PATH.read_text(encoding="utf-8")
+except Exception:
+    CODEBOOK_TEXT = "Không tìm thấy file Codebook."
+
+# ==========================================
+# 2. QUẢN LÝ LỊCH SỬ HỘI THOẠI
+# ==========================================
+HISTORY_FILE = "chat_history_v2.json"
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+def save_history(all_chats):
+    with open(HISTORY_FILE, "w", encoding="utf-8") as f:
+        json.dump(all_chats, f, ensure_ascii=False, indent=4)
+
+# ==========================================
+# 3. KHUÔN ĐÚC ĐẦU RA (TƯ DUY V1 + AN TOÀN V2)
+# ==========================================
 class ChartSpec(BaseModel):
-    type: Literal[
-        "none",
-        "bar",
-        "line",
-        "scatter",
-        "pie"
-    ] = "none"
-
-    x: Optional[str] = None
-    y: Optional[str] = None
-    title: Optional[str] = None
-
+    type: Literal["none", "bar", "line", "scatter", "pie"] = Field(description="Loại biểu đồ. Chọn 'none' nếu không cần.")
+    x: Optional[str] = Field(description="Tên cột trục X (BẮT BUỘC phải tồn tại trong kết quả SQL)")
+    y: Optional[str] = Field(description="Tên cột trục Y (BẮT BUỘC phải tồn tại trong kết quả SQL)")
+    title: Optional[str] = Field(description="Tiêu đề biểu đồ")
 
 class Presentation(BaseModel):
-    answer: str
-    insights: List[str] = Field(default_factory=list)
-    strategies: List[str] = Field(default_factory=list)
-    limitations: List[str] = Field(default_factory=list)
-    chart: ChartSpec = Field(default_factory=ChartSpec)
+    answer: str = Field(description="Câu trả lời giao tiếp tự nhiên, thân thiện với người dùng.")
+    sql_query: str = Field(description="Câu lệnh SQL hợp lệ. LUÔN dùng DISTINCT khi đếm ID.")
+    basic_insights: List[str] = Field(description="Insight cơ bản: Đọc vị các con số tổng quan, xu hướng chính.")
+    deep_insights: List[str] = Field(description="Insight chuyên sâu/Nghịch lý: Phát hiện điểm bất thường, rủi ro ngầm, hoặc cơ hội ẩn giấu.")
+    short_term_strategy: List[str] = Field(description="Chiến lược Ngắn hạn (Cấp bách) dựa trên dữ liệu.")
+    medium_term_strategy: List[str] = Field(description="Chiến lược Trung hạn dựa trên dữ liệu.")
+    long_term_strategy: List[str] = Field(description="Chiến lược Dài hạn dựa trên dữ liệu.")
+    chart: ChartSpec = Field(description="Cấu hình biểu đồ Plotly minh họa cho Insight.")
 
+# ==========================================
+# 4. BỘ NÃO XỬ LÝ (AGENT)
+# ==========================================
+SYSTEM_PROMPT = f"""Bạn là Giám đốc Vận hành (COO) & Kỹ sư Dữ liệu cấp cao tại một E-commerce Marketplace.
 
-# ============================================================
-# 6. BUILD AGENT
-# ============================================================
+ĐÂY LÀ TỪ ĐIỂN DỮ LIỆU CỦA HỆ THỐNG (CODEBOOK):
+{CODEBOOK_TEXT}
 
-@st.cache_resource(show_spinner=False)
-def build_agent():
-
-    llm = ChatGroq(
-        model="openai/gpt-oss-20b",
-        api_key=st.secrets["GROQ_API_KEY"],
-        temperature=0
-    )
-
-    agent = create_agent(
-        model=llm,
-        tools=TOOLS,
-        system_prompt=SYSTEM_PROMPT
-    )
-
-    structured_llm = llm.with_structured_output(
-        Presentation,
-        method="function_calling"
-    )
-
-    return agent, structured_llm
-
-
-# ============================================================
-# 7. EXTRACT SQL FROM AGENT TRACE
-# ============================================================
-
-def extract_sql_queries(messages):
-
-    queries = []
-
-    for message in messages:
-
-        tool_calls = getattr(
-            message,
-            "tool_calls",
-            None
-        )
-
-        if not tool_calls:
-            continue
-
-        for call in tool_calls:
-
-            if call.get("name") == "execute_sql":
-
-                sql = call.get(
-                    "args",
-                    {}
-                ).get("sql")
-
-                if sql:
-                    queries.append(sql)
-
-    return queries
-
-
-# ============================================================
-# 8. LOAD LAST SQL RESULT AS DATA
-# ============================================================
-
-def sql_to_records(sql: str):
-
-    validation = validate_sql_query(sql)
-
-    if validation["status"] == "BLOCKED":
-        return []
-
-    db_uri = f"file:{DB_PATH}?mode=ro"
-
-    with sqlite3.connect(db_uri, uri=True) as conn:
-        df = pd.read_sql_query(sql, conn)
-
-    return df.head(200).to_dict(
-        orient="records"
-    )
-
-
-# ============================================================
-# 9. MAIN AGENT FUNCTION
-# ============================================================
-
-def ask_data_agent(
-    question,
-    history
-):
-    # ========================================================
-    # HARD GUARD: ambiguous revenue definition
-    # Do not rely on the LLM to obey this rule.
-    # ========================================================
-
-    q = question.lower()
-
-    mentions_revenue = "revenue" in q
-
-    explicitly_price = (
-        "sum(price)" in q
-        or "sum of price" in q
-        or "using price" in q
-    )
-
-    explicitly_payment = (
-        "sum(payment_value)" in q
-        or "sum of payment_value" in q
-        or "using payment_value" in q
-    )
-
-    if mentions_revenue and not explicitly_price and not explicitly_payment:
-        return {
-            "answer": (
-                "Revenue is ambiguous in this transformed dataset. "
-                "Which definition would you like to use?\n\n"
-                "1. **SUM(price)** — sum of prices on the retained order-item rows.\n"
-                "2. **SUM(payment_value)** — sum of recorded retained payment values.\n\n"
-                "Neither should automatically be interpreted as complete original-order revenue."
-            ),
-            "sql": [],
-            "data": [],
-            "insights": [],
-            "strategies": [],
-            "limitations": [],
-            "chart": {
-                "type": "none",
-                "x": None,
-                "y": None,
-                "title": None
-            }
-        }
-
-    agent, structured_llm = build_agent()
-
-    messages = history[-10:] + [
-        {
-            "role": "user",
-            "content": question
-        }
-    ]
-
-    result = agent.invoke({
-        "messages": messages
-    })
-
-    final_answer = result[
-        "messages"
-    ][-1].content
-
-    sql_queries = extract_sql_queries(
-        result["messages"]
-    )
-
-    # If no SQL was executed, the agent may be asking
-    # a clarification or explaining an unsupported metric.
-    # Preserve its answer exactly instead of sending empty
-    # SQL data to the formatting LLM.
-    if not sql_queries:
-        return {
-            "answer": final_answer,
-            "sql": [],
-            "data": [],
-            "insights": [],
-            "strategies": [],
-            "limitations": [],
-            "chart": {
-                "type": "none",
-                "x": None,
-                "y": None,
-                "title": None
-            }
-        }
-
-    data = []
-
-    if sql_queries:
-        try:
-            data = sql_to_records(
-                sql_queries[-1]
-            )
-        except Exception:
-            data = []
-
-    chart_requested = any(
-        word in question.lower()
-        for word in [
-            "chart",
-            "graph",
-            "plot",
-            "visual",
-            "visualization",
-            "biểu đồ",
-            "vẽ"
-        ]
-    )
-
-    format_prompt = f"""
-Convert the completed data analysis into structured output.
-
-USER QUESTION:
-{question}
-
-AGENT ANSWER:
-{final_answer}
-
-SQL DATA:
-{json.dumps(data[:50], ensure_ascii=False, default=str)}
-
-Rules:
-
-- Preserve the numerical facts from the agent/database.
-- Do not invent new numbers.
-- Insights must be supported by SQL evidence.
-- Strategies must be cautious and supported by the evidence.
-- Limitations should mention material dataset limitations.
-- Never invent currency.
-
-Chart requested: {chart_requested}
-
-If chart_requested is False:
-chart.type MUST be "none".
-
-If chart_requested is True:
-choose a chart only when the SQL data can support it.
-
-Chart x and y MUST exactly match column names in SQL DATA.
+QUY TẮC BẮT BUỘC:
+1. SỰ THẬT DỮ LIỆU: LUÔN viết SQL để lấy số liệu thực. Không tự bịa số liệu. Tuân thủ định nghĩa doanh thu trong Codebook.
+2. TƯ DUY PHÂN TÍCH: Phải luôn tìm ra các nghịch lý hoặc rủi ro ngầm (Deep Insights) chứ không chỉ đọc số liệu bề nổi.
+3. CHIẾN LƯỢC: Các đề xuất chiến lược (Ngắn, Trung, Dài hạn) phải bám sát vào những con số vừa tìm được.
+4. BIỂU ĐỒ: Cấu hình ChartSpec hợp lý. Tên cột x, y phải khớp 100% với tên cột bạn SELECT trong câu SQL.
 """
 
-    try:
-        presentation = structured_llm.invoke(
-            format_prompt
-        )
-
-    except Exception:
-
-        presentation = Presentation(
-            answer=final_answer,
-            insights=[],
-            strategies=[],
-            limitations=[],
-            chart=ChartSpec(type="none")
-        )
-
-    # ------------------------------------------------------------
-    # Deterministic chart fallback
-    # ------------------------------------------------------------
+def analyze_data(question, api_key):
+    llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=api_key, temperature=0.1)
+    structured_llm = llm.with_structured_output(Presentation)
     
-    if not chart_requested:
-        presentation.chart = ChartSpec(type="none")
+    messages = [
+        SystemMessage(content=SYSTEM_PROMPT),
+        HumanMessage(content=question)
+    ]
     
-    elif data:
+    result = structured_llm.invoke(messages)
     
-        df_chart = pd.DataFrame(data)
+    data = []
+    if result.sql_query:
+        try:
+            if any(kw in result.sql_query.upper() for kw in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER"]):
+                raise Exception("Phát hiện mã SQL thay đổi dữ liệu bị cấm!")
+                
+            conn = sqlite3.connect(DB_PATH)
+            df = pd.read_sql_query(result.sql_query, conn)
+            data = df.to_dict(orient="records")
+            conn.close()
+        except Exception as e:
+            result.answer += f"\n\n(⚠️ Lỗi SQL: {e})"
+            
+    return result, data
+
+# ==========================================
+# 5. GIAO DIỆN STREAMLIT CHUẨN UX/UI V1
+# ==========================================
+st.set_page_config(page_title="My AI agent", page_icon="🛒", layout="wide")
+st.title("🛒 My AI agent")
+st.markdown("Trợ lý AI phân tích dữ liệu, săn Insight & Hoạch định Chiến lược")
+st.markdown("🔥 **Agent phát triển bởi: Group 3 - TINE313** 🔥")
+
+if "all_chats" not in st.session_state:
+    st.session_state.all_chats = load_history()
+if "current_session_id" not in st.session_state:
+    st.session_state.current_session_id = str(uuid.uuid4())
+    if st.session_state.current_session_id not in st.session_state.all_chats:
+        st.session_state.all_chats[st.session_state.current_session_id] = []
+
+with st.sidebar:
+    st.markdown("### 🔥 Group 3 - TINE313")
+    st.markdown("---")
     
-        numeric_cols = df_chart.select_dtypes(
-            include="number"
-        ).columns.tolist()
-    
-        categorical_cols = [
-            col for col in df_chart.columns
-            if col not in numeric_cols
-        ]
-    
-        current_chart = presentation.chart
-    
-        # Check whether LLM-generated chart specification is usable
-        chart_valid = (
-            current_chart.type != "none"
-            and current_chart.x in df_chart.columns
-            and current_chart.y in df_chart.columns
-        )
-    
-        # If not, Python chooses a sensible chart
-        if not chart_valid:
-    
-            q_lower = question.lower()
-    
-            # Relationship between two numeric variables -> scatter
-            if (
-                ("relationship" in q_lower or "scatter" in q_lower)
-                and len(numeric_cols) >= 2
-            ):
-                presentation.chart = ChartSpec(
-                    type="scatter",
-                    x=numeric_cols[0],
-                    y=numeric_cols[1],
-                    title="Data Relationship"
-                )
-    
-            # Category + numeric measure -> bar
-            elif categorical_cols and numeric_cols:
-                presentation.chart = ChartSpec(
-                    type="bar",
-                    x=categorical_cols[0],
-                    y=numeric_cols[0],
-                    title=f"{numeric_cols[0]} by {categorical_cols[0]}"
-                )
-    
-            # Two numeric columns -> scatter
-            elif len(numeric_cols) >= 2:
-                presentation.chart = ChartSpec(
-                    type="scatter",
-                    x=numeric_cols[0],
-                    y=numeric_cols[1],
-                    title="Data Relationship"
-                )
-    
-            else:
-                presentation.chart = ChartSpec(type="none")
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("➕ Chat Mới", type="primary", use_container_width=True):
+            st.session_state.current_session_id = str(uuid.uuid4())
+            st.session_state.all_chats[st.session_state.current_session_id] = []
+            st.rerun()
+    with col2:
+        with st.popover("⚙️ Cấu hình"):
+            api_key = st.text_input("Gemini API Key:", type="password")
+            st.markdown("[👉 Lấy API Key tại đây](https://aistudio.google.com/app/apikey)")
 
-    return {
-        "answer": presentation.answer,
-        "sql": sql_queries,
-        "data": data,
-        "insights": presentation.insights,
-        "strategies": presentation.strategies,
-        "limitations": presentation.limitations,
-        "chart": presentation.chart.model_dump()
-    }
+    st.markdown("---")
+    st.markdown("📂 **Danh mục Bảng Dữ liệu**")
+    with st.expander("Hiển thị chi tiết bảng"):
+        st.markdown("""
+        - **df_customers** (Khách hàng)
+        - **df_orders** (Đơn hàng trung tâm)
+        - **df_orderitems** (Chi tiết giao hàng)
+        - **df_products** (Sản phẩm)
+        - **df_payments** (Thanh toán)
+        """)
 
+    st.markdown("---")
+    st.markdown("🕒 **Lịch sử Hội thoại**")
+    has_history = False
+    for session_id, chat_messages in reversed(st.session_state.all_chats.items()):
+        if len(chat_messages) > 0:
+            has_history = True
+            title = "Tin nhắn mới..."
+            for m in chat_messages:
+                if m["role"] == "user":
+                    title = m["content"][:22] + "..."
+                    break
+            is_active = (session_id == st.session_state.current_session_id)
+            btn_label = f"👉 {title}" if is_active else f"💬 {title}"
+            if st.button(btn_label, key=f"hist_{session_id}", use_container_width=True):
+                st.session_state.current_session_id = session_id
+                st.rerun()
+    if not has_history:
+        st.info("Chưa có lịch sử trò chuyện.")
 
-# ============================================================
-# 10. STREAMLIT UI
-# ============================================================
-
-st.set_page_config(
-    page_title="E-commerce AI Data Analyst",
-    layout="wide"
-)
-
-st.title("E-commerce AI Data Analyst")
-
-st.caption(
-    "Groq + LangChain + SQLite • Read-only SQL"
-)
-
-
-# CHAT STATE
-if "history" not in st.session_state:
-    st.session_state.history = []
-
-
-# RESET
-if st.sidebar.button("Clear conversation"):
-    st.session_state.history = []
-    st.rerun()
-
-
-# DISPLAY PREVIOUS CHAT
-for msg in st.session_state.history:
-
+for msg in st.session_state.all_chats[st.session_state.current_session_id]:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-
-# USER QUESTION
-question = st.chat_input(
-    "Ask a question about the e-commerce data..."
-)
-
-
-if question:
-
-    with st.chat_message("user"):
-        st.markdown(question)
-
-    prior_history = list(
-        st.session_state.history
-    )
-
-    with st.spinner(
-        "Analyzing database..."
-    ):
-
-        result = ask_data_agent(
-            question,
-            prior_history
-        )
-
-    answer = result["answer"]
-
-    with st.chat_message("assistant"):
-
-        st.markdown(answer)
-
-        # DATA TABLE
-        if result["data"]:
-
-            df_result = pd.DataFrame(
-                result["data"]
-            )
-
-            st.subheader("Data")
-            st.dataframe(
-                df_result,
-                use_container_width=True
-            )
-
-            # CHART
-            chart = result["chart"]
-
-            chart_type = chart.get("type")
-            x = chart.get("x")
-            y = chart.get("y")
-
-            if (
-                chart_type != "none"
-                and x in df_result.columns
-                and y in df_result.columns
-            ):
-
-                st.subheader("Visualization")
-
-                if chart_type == "bar":
-                    fig = px.bar(
-                        df_result,
-                        x=x,
-                        y=y,
-                        title=chart.get("title")
-                    )
-
-                elif chart_type == "line":
-                    fig = px.line(
-                        df_result,
-                        x=x,
-                        y=y,
-                        title=chart.get("title")
-                    )
-
-                elif chart_type == "scatter":
-                    fig = px.scatter(
-                        df_result,
-                        x=x,
-                        y=y,
-                        title=chart.get("title")
-                    )
-
-                elif chart_type == "pie":
-                    fig = px.pie(
-                        df_result,
-                        names=x,
-                        values=y,
-                        title=chart.get("title")
-                    )
-
-                else:
-                    fig = None
-
-                if fig is not None:
-                    st.plotly_chart(
-                        fig,
-                        use_container_width=True
-                    )
-
-        # INSIGHTS
-        if result["insights"]:
-
-            st.subheader("Insights")
-
-            for item in result["insights"]:
-                st.write("•", item)
-
-        # STRATEGIES
-        if result["strategies"]:
-
-            st.subheader("Business Strategy")
-
-            for item in result["strategies"]:
-                st.write("•", item)
-
-        # LIMITATIONS
-        if result["limitations"]:
-
-            with st.expander(
-                "Limitations"
-            ):
-                for item in result["limitations"]:
-                    st.write("•", item)
-
-        # SQL TRANSPARENCY
-        if result["sql"]:
-
-            with st.expander(
-                "SQL used"
-            ):
-
-                for i, sql in enumerate(
-                    result["sql"],
-                    start=1
-                ):
-
-                    st.code(
-                        sql,
-                        language="sql"
-                    )
-
-
-    # Save conversation context
-    st.session_state.history.append({
-        "role": "user",
-        "content": question
-    })
-
-    st.session_state.history.append({
-        "role": "assistant",
-        "content": answer
-    })
+if prompt := st.chat_input("VD: Cho tôi insight về doanh thu theo từng tiểu bang..."):
+    if not api_key:
+        st.error("⚠️ Vui lòng nhập Gemini API Key ở thanh Cấu hình bên trái!")
+    else:
+        st.session_state.all_chats[st.session_state.current_session_id].append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.markdown(prompt)
+            
+        with st.chat_message("assistant"):
+            with st.spinner("Agent đang đọc Codebook, chạy SQL và tổng hợp Insight..."):
+                try:
+                    if not os.path.exists(DB_PATH):
+                        st.error(f"Không tìm thấy file Database tại: {DB_PATH}. Hãy chắc chắn thư mục data/processed/ chứa file ecommerce_clean.db.")
+                    else:
+                        result_obj, data = analyze_data(prompt, api_key)
+                        
+                        st.markdown(result_obj.answer)
+                        st.markdown("💡 **Hệ thống AI đã bóc tách thành công các Insight chuyên sâu từ CSDL.**")
+                        
+                        tab1, tab2, tab3 = st.tabs(["📊 Insight & Biểu đồ", "💡 Chiến lược", "⚙️ Dữ liệu & SQL"])
+                        
+                        with tab1:
+                            st.markdown("### 1. Insight Cơ bản")
+                            for ins in result_obj.basic_insights:
+                                st.write(f"🔹 {ins}")
+                                
+                            st.markdown("### 2. Insight Chuyên sâu & Nghịch lý")
+                            for ins in result_obj.deep_insights:
+                                st.write(f"⚠️ **{ins}**")
+                            
+                            if data and result_obj.chart.type != "none":
+                                st.markdown("---")
+                                df_chart = pd.DataFrame(data)
+                                c = result_obj.chart
+                                try:
+                                    if c.type == "bar":
+                                        st.plotly_chart(px.bar(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
+                                    elif c.type == "pie":
+                                        st.plotly_chart(px.pie(df_chart, names=c.x, values=c.y, title=c.title), use_container_width=True)
+                                    elif c.type == "line":
+                                        st.plotly_chart(px.line(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
+                                    elif c.type == "scatter":
+                                        st.plotly_chart(px.scatter(df_chart, x=c.x, y=c.y, title=c.title), use_container_width=True)
+                                except Exception as e:
+                                    st.warning(f"Cấu trúc biểu đồ AI đề xuất chưa khớp với dữ liệu: {e}")
+                                    
+                        with tab2:
+                            st.markdown("### 🚀 Chiến lược Ngắn hạn (Cấp bách)")
+                            for strat in result_obj.short_term_strategy:
+                                st.write(f"⚡ {strat}")
+                                
+                            st.markdown("### 📈 Chiến lược Trung hạn")
+                            for strat in result_obj.medium_term_strategy:
+                                st.write(f"🎯 {strat}")
+                                
+                            st.markdown("### 🌍 Chiến lược Dài hạn")
+                            for strat in result_obj.long_term_strategy:
+                                st.write(f"🌟 {strat}")
+                                
+                        with tab3:
+                            st.markdown("**Câu lệnh SQL đã thực thi:**")
+                            st.code(result_obj.sql_query, language="sql")
+                            if data:
+                                st.markdown("**🗄️ Bảng kết quả (Data Preview):**")
+                                st.dataframe(pd.DataFrame(data), use_container_width=True)
+                        
+                        st.session_state.all_chats[st.session_state.current_session_id].append(
+                            {"role": "assistant", "content": result_obj.answer + "\n\n*(Xem chi tiết Insight, Chiến lược và Biểu đồ tại các Tab)*"}
+                        )
+                        save_history(st.session_state.all_chats)
+                        
+                except Exception as e:
+                    st.error(f"Lỗi hệ thống: {e}")
