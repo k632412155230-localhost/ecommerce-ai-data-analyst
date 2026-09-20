@@ -1,4 +1,3 @@
-
 import base64
 import json
 import re
@@ -13,7 +12,7 @@ import streamlit as st
 from google.oauth2 import service_account
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-st.set_page_config(page_title="E-commerce AI Data Analyst", page_icon="📊", layout="wide")
+st.set_page_config(page_title="My AI agent", page_icon="🛒", layout="wide")
 
 DB_PATH = Path("data/processed/ecommerce_clean.db").resolve()
 if not DB_PATH.exists():
@@ -82,8 +81,6 @@ def validate_sql(sql):
     if "order_delivered_timestamp" in low and "is not null" not in low:
         warnings.append("Delivery analysis should normally require order_delivered_timestamp IS NOT NULL.")
 
-    # Fatal semantic gate: transformed order_items contains one retained row/order.
-    # Therefore basket size / items-per-order / original item-count metrics are invalid.
     if (
         "order_items" in low
         and (
@@ -155,9 +152,10 @@ def friendly_error(e, stage):
 
 # ---------- Tolerant parsers ----------
 def sql_blocks(text):
-    blocks = re.findall(r"```sql\s*(.*?)```", text, flags=re.S|re.I)
+    tick3 = "`" * 3
+    blocks = re.findall(rf"{tick3}sql\s*(.*?){tick3}", text, flags=re.S|re.I)
     if not blocks:
-        blocks = re.findall(r"```\s*((?:SELECT|WITH)\b.*?)```", text, flags=re.S|re.I)
+        blocks = re.findall(rf"{tick3}\s*((?:SELECT|WITH)\b.*?){tick3}", text, flags=re.S|re.I)
     return [x.strip() for x in blocks if x.strip()]
 
 def parse_plan(text, prefix, limit):
@@ -205,6 +203,7 @@ def parse_final(text):
 
 # ---------- Stage 1 ----------
 def analyst_plan(question, history_text):
+    tick3 = "`" * 3
     prompt = f"""
 You are the ANALYST stage.
 
@@ -237,24 +236,19 @@ Rules:
 
 Return only:
 ## A1 | short title
-```sql
+{tick3}sql
 SELECT ...
-```
+{tick3}
 ## A2 | short title
-```sql
+{tick3}sql
 SELECT ...
-```
+{tick3}
 """
     return parse_plan(ask_llm(prompt),"A",4)
 
-
 # ---------- SQL repair ----------
 def repair_failed_plan(stage_name, question, results):
-    """
-    One batch repair call for all BLOCKED/ERROR queries.
-    The model may replace an impossible analysis with another useful analysis,
-    but must keep the same IDs and use only real SQLite schema.
-    """
+    tick3 = "`" * 3
     failed = [
         {
             "id": x["id"],
@@ -299,45 +293,24 @@ STRICT RULES:
 Return ONLY markdown blocks like:
 
 ## A1 | corrected title
-```sql
+{tick3}sql
 SELECT ...
-```
+{tick3}
 
 One block for each failed ID. No prose.
 """
-
     raw = ask_llm(prompt)
-
     prefix = "A" if stage_name.lower().startswith("analyst") else "T"
-    repaired = parse_plan(
-        raw,
-        prefix,
-        len(failed),
-    )
+    repaired = parse_plan(raw, prefix, len(failed))
 
-    return {
-        item["id"]: item
-        for item in repaired
-    }
-
+    return {item["id"]: item for item in repaired}
 
 def repair_results_once(stage_name, question, results):
-    """
-    Replace failed plan items with repaired SQL and execute them once.
-    Successful original queries are preserved.
-    """
-    if not any(
-        x["status"] in {"BLOCKED", "ERROR"}
-        for x in results
-    ):
+    if not any(x["status"] in {"BLOCKED", "ERROR"} for x in results):
         return results
 
     try:
-        repaired_map = repair_failed_plan(
-            stage_name,
-            question,
-            results,
-        )
+        repaired_map = repair_failed_plan(stage_name, question, results)
     except Exception:
         return results
 
@@ -345,32 +318,19 @@ def repair_results_once(stage_name, question, results):
         return results
 
     new_results = []
-
     for old_item in results:
-        replacement = repaired_map.get(
-            old_item["id"]
-        )
-
-        if (
-            old_item["status"] in {"BLOCKED", "ERROR"}
-            and replacement
-        ):
-            repaired_result = execute_plan(
-                [replacement]
-            )[0]
-            new_results.append(
-                repaired_result
-            )
+        replacement = repaired_map.get(old_item["id"])
+        if old_item["status"] in {"BLOCKED", "ERROR"} and replacement:
+            repaired_result = execute_plan([replacement])[0]
+            new_results.append(repaired_result)
         else:
-            new_results.append(
-                old_item
-            )
+            new_results.append(old_item)
 
     return new_results
 
-
 # ---------- Stage 2 ----------
 def paradox_plan(question, primary):
+    tick3 = "`" * 3
     evidence = [{"id":x["id"],"title":x["title"],"rows":x["records"][:6]} for x in primary]
     prompt = f"""
 You are the PARADOX HUNTER.
@@ -401,13 +361,13 @@ Rules:
 
 Return only:
 ## T1 | short test question
-```sql
+{tick3}sql
 WITH ... SELECT ...
-```
+{tick3}
 ## T2 | short test question
-```sql
+{tick3}sql
 SELECT ...
-```
+{tick3}
 """
     return parse_plan(ask_llm(prompt),"T",2)
 
@@ -494,7 +454,6 @@ Use the user's language.
 """
     return parse_final(ask_llm(prompt))
 
-
 # ---------- Resumable workflow cache ----------
 def workflow_cache_key(question, history):
     context = "|".join(
@@ -506,12 +465,10 @@ def workflow_cache_key(question, history):
         raw.encode("utf-8")
     ).hexdigest()
 
-
 def get_workflow_cache():
     if "workflow_cache" not in st.session_state:
         st.session_state.workflow_cache = {}
     return st.session_state.workflow_cache
-
 
 def cached_stage_state(key):
     cache = get_workflow_cache()
@@ -524,11 +481,9 @@ def cached_stage_state(key):
         }
     return cache[key]
 
-
 def clear_workflow_cache_for_key(key):
     cache = get_workflow_cache()
     cache.pop(key, None)
-
 
 # ---------- Workflow ----------
 def empty_strategy():
@@ -591,10 +546,7 @@ def ask_agent(question, history):
         "strategist": "PENDING",
     }
 
-    key = workflow_cache_key(
-        question,
-        history,
-    )
+    key = workflow_cache_key(question, history)
     state = cached_stage_state(key)
 
     hist = "\n".join(
@@ -602,292 +554,123 @@ def ask_agent(question, history):
         for m in history[-4:]
     )
 
-    # ========================================================
     # Stage 1 — Analyst
-    # Reuse prior successful evidence if available.
-    # ========================================================
     if state["usable_primary"] is not None:
         primary = state["primary"]
         usable = state["usable_primary"]
-        trace["analyst"] = (
-            f"CACHED — reused {len(usable)} analysis table(s)"
-        )
-
+        trace["analyst"] = f"CACHED — reused {len(usable)} analysis table(s)"
     else:
         trace["analyst"] = "RUNNING"
-
         try:
-            plan = analyst_plan(
-                question,
-                hist,
-            )
-
+            plan = analyst_plan(question, hist)
         except Exception as e:
             trace["analyst"] = "FAILED"
-
-            return err_result(
-                friendly_error(
-                    e,
-                    "Analyst",
-                ),
-                trace,
-            )
+            return err_result(friendly_error(e, "Analyst"), trace)
 
         if not plan:
-            trace["analyst"] = (
-                "FAILED — no SQL blocks parsed"
-            )
-
-            return err_result(
-                (
-                    "Analyst did not return executable SQL blocks. "
-                    "Retry once."
-                ),
-                trace,
-            )
+            trace["analyst"] = "FAILED — no SQL blocks parsed"
+            return err_result("Analyst did not return executable SQL blocks. Retry once.", trace)
 
         primary = execute_plan(plan)
-
-        # One batch repair call for schema/dialect/semantic failures.
-        primary = repair_results_once(
-            "Analyst",
-            question,
-            primary,
-        )
+        primary = repair_results_once("Analyst", question, primary)
 
         usable = [
-            x
-            for x in primary
-            if (
-                x["status"] in {"SAFE", "WARNING"}
-                and x["records"]
-            )
+            x for x in primary
+            if (x["status"] in {"SAFE", "WARNING"} and x["records"])
         ]
 
         if not usable:
-            trace["analyst"] = (
-                "FAILED — no usable SQL evidence"
-            )
-
-            return err_result(
-                "Analyst generated no usable SQL evidence.",
-                trace,
-                primary,
-            )
+            trace["analyst"] = "FAILED — no usable SQL evidence"
+            return err_result("Analyst generated no usable SQL evidence.", trace, primary)
 
         broad_request = any(
-            token in q
-            for token in [
-                "insight",
-                "business",
-                "doanh nghiệp",
-                "chiến lược",
-                "strategy",
-            ]
+            token in q for token in ["insight", "business", "doanh nghiệp", "chiến lược", "strategy"]
         )
 
         if broad_request and len(usable) < 2:
-            trace["analyst"] = (
-                f"INSUFFICIENT — only {len(usable)} usable analysis table(s)"
-            )
-
+            trace["analyst"] = f"INSUFFICIENT — only {len(usable)} usable analysis table(s)"
             return err_result(
-                (
-                    "Chỉ có một chiều phân tích hợp lệ sau khi kiểm tra SQL, nên agent "
-                    "không tạo broad business strategy để tránh suy diễn quá mức. "
-                    "Hãy thử lại; app sẽ yêu cầu Analyst dùng schema thật để tạo thêm evidence."
-                ),
-                trace,
-                primary,
+                "Chỉ có một chiều phân tích hợp lệ sau khi kiểm tra SQL, nên agent "
+                "không tạo broad business strategy để tránh suy diễn quá mức. "
+                "Hãy thử lại; app sẽ yêu cầu Analyst dùng schema thật để tạo thêm evidence.",
+                trace, primary
             )
 
         state["primary"] = primary
         state["usable_primary"] = usable
+        trace["analyst"] = f"COMPLETED — {len(usable)} table(s)"
 
-        trace["analyst"] = (
-            f"COMPLETED — {len(usable)} table(s)"
-        )
-
-    # ========================================================
     # Stage 2 — Paradox Hunter
-    # Stop immediately on rate limit; do NOT waste another call
-    # on Final Judge.
-    # ========================================================
     if state["usable_tests"] is not None:
         tests = state["tests"]
         usable_tests = state["usable_tests"]
-
-        trace["paradox_hunter"] = (
-            f"CACHED — reused {len(tests)} test(s)"
-        )
-        trace["paradox_verification"] = (
-            f"CACHED — reused {len(usable_tests)} test table(s)"
-        )
-
+        trace["paradox_hunter"] = f"CACHED — reused {len(tests)} test(s)"
+        trace["paradox_verification"] = f"CACHED — reused {len(usable_tests)} test table(s)"
     else:
         trace["paradox_hunter"] = "RUNNING"
-
         try:
-            test_plan = paradox_plan(
-                question,
-                usable,
-            )
-
+            test_plan = paradox_plan(question, usable)
         except Exception as e:
             if is_rate_limit(e):
                 trace["paradox_hunter"] = "RATE LIMITED"
                 trace["paradox_verification"] = "NOT RUN"
                 trace["strategist"] = "NOT RUN"
-
                 return err_result(
-                    (
-                        friendly_error(
-                            e,
-                            "Paradox Hunter",
-                        )
-                        + "\n\n**Progress saved:** Analyst SQL evidence has been cached. "
-                          "After the wait time, send the same question again and the app "
-                          "will resume from Paradox Hunter instead of rerunning Analyst."
-                    ),
-                    trace,
-                    primary=primary,
+                    friendly_error(e, "Paradox Hunter")
+                    + "\n\n**Progress saved:** Analyst SQL evidence has been cached. "
+                      "After the wait time, send the same question again and the app "
+                      "will resume from Paradox Hunter instead of rerunning Analyst.",
+                    trace, primary=primary
                 )
-
             test_plan = []
-            trace["paradox_hunter"] = (
-                "FAILED — "
-                + friendly_error(
-                    e,
-                    "Paradox Hunter",
-                )
-            )
+            trace["paradox_hunter"] = "FAILED — " + friendly_error(e, "Paradox Hunter")
 
-        tests = (
-            execute_plan(test_plan)
-            if test_plan
-            else []
-        )
-
+        tests = execute_plan(test_plan) if test_plan else []
         if tests:
-            tests = repair_results_once(
-                "Paradox Hunter",
-                question,
-                tests,
-            )
+            tests = repair_results_once("Paradox Hunter", question, tests)
 
         usable_tests = [
-            x
-            for x in tests
-            if (
-                x["status"] in {"SAFE", "WARNING"}
-                and x["records"]
-            )
+            x for x in tests
+            if (x["status"] in {"SAFE", "WARNING"} and x["records"])
         ]
 
         state["tests"] = tests
         state["usable_tests"] = usable_tests
 
         if test_plan:
-            trace["paradox_hunter"] = (
-                f"COMPLETED — {len(test_plan)} test(s)"
-            )
-            trace["paradox_verification"] = (
-                f"COMPLETED — {len(usable_tests)} test table(s)"
-            )
+            trace["paradox_hunter"] = f"COMPLETED — {len(test_plan)} test(s)"
+            trace["paradox_verification"] = f"COMPLETED — {len(usable_tests)} test table(s)"
         else:
-            trace["paradox_verification"] = (
-                "SKIPPED — no executable test"
-            )
+            trace["paradox_verification"] = "SKIPPED — no executable test"
 
-    # ========================================================
     # Stage 3 — Final Judge + Strategist
-    # If rate-limited, keep ALL previous stages cached.
-    # ========================================================
     trace["strategist"] = "RUNNING"
-
     try:
-        report = final_report(
-            question,
-            usable,
-            usable_tests,
-        )
-
+        report = final_report(question, usable, usable_tests)
     except Exception as e:
         if is_rate_limit(e):
             trace["strategist"] = "RATE LIMITED"
-
             return err_result(
-                (
-                    friendly_error(
-                        e,
-                        "Final Judge + Strategist",
-                    )
-                    + "\n\n**Progress saved:** Analyst evidence and Paradox SQL tests "
-                      "have been cached. After the wait time, send the same question again; "
-                      "the app will resume directly at the Final Judge."
-                ),
-                trace,
-                primary=primary,
-                tests=tests,
+                friendly_error(e, "Final Judge + Strategist")
+                + "\n\n**Progress saved:** Analyst evidence and Paradox SQL tests "
+                  "have been cached. After the wait time, send the same question again; "
+                  "the app will resume directly at the Final Judge.",
+                trace, primary=primary, tests=tests
             )
-
         trace["strategist"] = "FAILED"
-
-        return err_result(
-            friendly_error(
-                e,
-                "Final Judge + Strategist",
-            ),
-            trace,
-            primary,
-            tests,
-        )
+        return err_result(friendly_error(e, "Final Judge + Strategist"), trace, primary, tests)
 
     trace["strategist"] = "COMPLETED"
 
-    supported = sum(
-        1
-        for j in report["judgments"]
-        if j["supported"]
-    )
-
-    trace["paradox_verification"] += (
-        f" | {supported} verified"
-    )
+    supported = sum(1 for j in report["judgments"] if j["supported"])
+    trace["paradox_verification"] += f" | {supported} verified"
 
     chart = {"type": "none"}
-
-    if any(
-        w in q
-        for w in [
-            "chart",
-            "graph",
-            "plot",
-            "visual",
-            "visualization",
-            "biểu đồ",
-            "vẽ",
-        ]
-    ):
+    if any(w in q for w in ["chart", "graph", "plot", "visual", "visualization", "biểu đồ", "vẽ"]):
         for x in usable:
-            df = pd.DataFrame(
-                x["records"]
-            )
-
-            nums = (
-                df.select_dtypes(
-                    include="number"
-                )
-                .columns
-                .tolist()
-            )
-
-            cats = [
-                c
-                for c in df.columns
-                if c not in nums
-            ]
-
+            df = pd.DataFrame(x["records"])
+            nums = df.select_dtypes(include="number").columns.tolist()
+            cats = [c for c in df.columns if c not in nums]
             if cats and nums:
                 chart = {
                     "type": "bar",
@@ -898,7 +681,6 @@ def ask_agent(question, history):
                 }
                 break
 
-    # Successful completion: clear temporary resume cache.
     clear_workflow_cache_for_key(key)
 
     return {
@@ -910,53 +692,83 @@ def ask_agent(question, history):
         "error": False,
     }
 
-# ---------- Multi-chat ----------
+# ---------- Multi-chat & UI ----------
 def create_chat():
-    cid=str(uuid.uuid4())
-    st.session_state.chats[cid]={"title":"New chat","messages":[]}
-    st.session_state.current_chat_id=cid
+    cid = str(uuid.uuid4())
+    st.session_state.chats[cid] = {"title": "New chat", "messages": []}
+    st.session_state.current_chat_id = cid
 
 def delete_chat(cid):
     if cid in st.session_state.chats:
         del st.session_state.chats[cid]
     if not st.session_state.chats:
         create_chat()
-    elif st.session_state.current_chat_id==cid:
-        st.session_state.current_chat_id=next(reversed(st.session_state.chats))
+    elif st.session_state.current_chat_id == cid:
+        st.session_state.current_chat_id = next(reversed(st.session_state.chats))
 
 if "chats" not in st.session_state:
-    st.session_state.chats={}
+    st.session_state.chats = {}
 if "current_chat_id" not in st.session_state or st.session_state.current_chat_id not in st.session_state.chats:
     create_chat()
 
-st.sidebar.title("💬 Chats")
-if st.sidebar.button("＋ New chat",use_container_width=True,type="primary"):
-    create_chat(); st.rerun()
-st.sidebar.markdown("---")
+# ========================================================
+# ---------- UI: CẤU HÌNH & SIDEBAR ----------
+# ========================================================
+with st.sidebar:
+    st.markdown("### 🔥 Group 3 - TINE313")
+    st.markdown("---")
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("➕ Chat Mới", type="primary", use_container_width=True):
+            create_chat()
+            st.rerun()
+    with col2:
+        with st.popover("⚙️ Cấu hình", use_container_width=True):
+            st.markdown("**Kết nối MySQL (Tùy chọn)**")
+            st.caption("Để trống nếu dùng SQLite mặc định.")
+            st.text_input("Host (VD: localhost):", key="db_host")
+            st.text_input("Port (VD: 3306):", key="db_port")
+            st.text_input("Username (VD: root):", key="db_user")
+            st.text_input("Password:", type="password", key="db_pass")
+            st.text_input("Database Name:", key="db_name")
 
-for cid, chat in reversed(list(st.session_state.chats.items())):
-    a,b=st.sidebar.columns([.82,.18])
-    current=cid==st.session_state.current_chat_id
-    with a:
-        if st.button(("● " if current else "")+chat["title"],key=f"open_{cid}",use_container_width=True):
-            st.session_state.current_chat_id=cid; st.rerun()
-    with b:
-        if st.button("🗑️",key=f"del_{cid}",use_container_width=True):
-            delete_chat(cid); st.rerun()
+    st.markdown("---")
+    st.markdown("💬 **Chats**")
 
-current=st.session_state.chats[st.session_state.current_chat_id]
-history=current["messages"]
+    for cid, chat in reversed(list(st.session_state.chats.items())):
+        a, b = st.columns([.82, .18])
+        current = (cid == st.session_state.current_chat_id)
+        with a:
+            if st.button(("● " if current else "") + chat["title"], key=f"open_{cid}", use_container_width=True):
+                st.session_state.current_chat_id = cid
+                st.rerun()
+        with b:
+            if st.button("🗑️", key=f"del_{cid}", use_container_width=True):
+                delete_chat(cid)
+                st.rerun()
 
-# ---------- UI ----------
-def render_list(items,empty):
-    vals=[str(x).strip() for x in (items or []) if str(x).strip()]
+current = st.session_state.chats[st.session_state.current_chat_id]
+history = current["messages"]
+
+# ========================================================
+# ---------- UI: MAIN PAGE ----------
+# ========================================================
+st.title("🛒 My AI agent")
+st.markdown("Trợ lý AI phân tích dữ liệu, săn Insight & Hoạch định Chiến lược")
+st.markdown("🔥 **Agent phát triển bởi: Group 3 - TINE313** 🔥")
+st.caption("Analyst → Paradox Hunter → SQL Verification → Final Judge & Strategy • Read-only SQLite")
+
+def render_list(items, empty):
+    vals = [str(x).strip() for x in (items or []) if str(x).strip()]
     if not vals:
-        st.info(empty); return
+        st.info(empty)
+        return
     for x in vals:
         st.markdown(f"- {x}")
 
 def render_audit(r):
-    t=r.get("stage_trace",{})
+    t = r.get("stage_trace", {})
     with st.expander("🔍 Auto-Audit & Agent Workflow"):
         st.markdown(f"- **1. Analyst:** {t.get('analyst','UNKNOWN')}")
         st.markdown(f"- **2. Paradox Hunter:** {t.get('paradox_hunter','UNKNOWN')}")
@@ -964,91 +776,108 @@ def render_audit(r):
         st.markdown(f"- **4. Final Judge + Strategist:** {t.get('strategist','UNKNOWN')}")
 
 def render_chart(r):
-    c=r.get("chart",{})
-    if c.get("type")!="bar": return
-    for x in r.get("primary_analyses",[]):
-        if x["id"]==c.get("source_id"):
-            df=pd.DataFrame(x["records"])
+    c = r.get("chart", {})
+    if c.get("type") != "bar": return
+    for x in r.get("primary_analyses", []):
+        if x["id"] == c.get("source_id"):
+            df = pd.DataFrame(x["records"])
             if c["x"] in df.columns and c["y"] in df.columns:
-                st.plotly_chart(px.bar(df,x=c["x"],y=c["y"],title=c.get("title")),use_container_width=True)
+                st.plotly_chart(px.bar(df, x=c["x"], y=c["y"], title=c.get("title")), use_container_width=True)
 
 def render_evidence(r):
     st.markdown("### Primary evidence")
-    for x in r.get("primary_analyses",[]):
+    for x in r.get("primary_analyses", []):
         st.markdown(f"#### {x['id']} — {x['title']}")
         st.caption(f"SQL validation: {x['status']}")
-        df=pd.DataFrame(x["records"])
-        if not df.empty: st.dataframe(df,use_container_width=True,hide_index=True)
+        df = pd.DataFrame(x["records"])
+        if not df.empty: st.dataframe(df, use_container_width=True, hide_index=True)
     st.markdown("---")
     st.markdown("### Paradox tests")
-    jm={j["id"]:j for j in r.get("judgments",[])}
-    tests=r.get("paradox_candidates",[])
+    jm = {j["id"]: j for j in r.get("judgments", [])}
+    tests = r.get("paradox_candidates", [])
     if not tests: st.info("No executable paradox test was produced in this run.")
     for x in tests:
         st.markdown(f"#### {x['id']} — {x['title']}")
-        df=pd.DataFrame(x["records"])
-        if not df.empty: st.dataframe(df,use_container_width=True,hide_index=True)
-        j=jm.get(x["id"])
+        df = pd.DataFrame(x["records"])
+        if not df.empty: st.dataframe(df, use_container_width=True, hide_index=True)
+        j = jm.get(x["id"])
         if j:
-            (st.success if j["supported"] else st.warning)(("SUPPORTED — " if j["supported"] else "NOT SUPPORTED — ")+j["reason"])
+            (st.success if j["supported"] else st.warning)(("SUPPORTED — " if j["supported"] else "NOT SUPPORTED — ") + j["reason"])
 
 def render_sql(r):
     st.markdown("### Analyst SQL")
-    for x in r.get("primary_analyses",[]):
+    for x in r.get("primary_analyses", []):
         st.markdown(f"#### {x['id']} — {x['status']}")
-        st.code(x["sql"],language="sql")
-        render_list(x["messages"],"")
+        st.code(x["sql"], language="sql")
+        render_list(x["messages"], "")
     st.markdown("---")
     st.markdown("### Paradox verification SQL")
-    for x in r.get("paradox_candidates",[]):
+    for x in r.get("paradox_candidates", []):
         st.markdown(f"#### {x['id']} — {x['status']}")
-        st.code(x["sql"],language="sql")
-        render_list(x["messages"],"")
+        st.code(x["sql"], language="sql")
+        render_list(x["messages"], "")
 
 def render_report(r):
     if r.get("error"):
-        st.error(r["answer"]); render_audit(r); return
+        st.error(r["answer"])
+        render_audit(r)
+        return
     st.success("💡 AI Agent đã hoàn tất: phân tích → tìm nghịch lý → kiểm chứng SQL → chiến lược.")
     render_audit(r)
-    a,b,c,d=st.tabs(["📊 Báo cáo Insight","💡 Chiến lược","🧪 Evidence & Paradox Test","⚙️ SQL"])
+    a, b, c, d = st.tabs(["📊 Báo cáo Insight", "💡 Chiến lược", "🧪 Evidence & Paradox Test", "⚙️ SQL"])
     with a:
-        st.markdown("### Kết luận"); st.markdown(r["answer"]); render_chart(r)
-        st.markdown("### 1. Insight cơ bản"); render_list(r.get("basic_insights",[]),"No basic insight produced.")
-        st.markdown("### 2. Insight nghịch lý"); render_list(r.get("paradoxical_insights",[]),"No verified paradox.")
+        st.markdown("### Kết luận")
+        st.markdown(r["answer"])
+        render_chart(r)
+        st.markdown("### 1. Insight cơ bản")
+        render_list(r.get("basic_insights", []), "No basic insight produced.")
+        st.markdown("### 2. Insight nghịch lý")
+        render_list(r.get("paradoxical_insights", []), "No verified paradox.")
         if r.get("limitations"):
-            with st.expander("⚠️ Giới hạn diễn giải"): render_list(r["limitations"],"")
+            with st.expander("⚠️ Giới hạn diễn giải"):
+                render_list(r["limitations"], "")
     with b:
-        s=r.get("strategy",empty_strategy()); c1,c2,c3=st.columns(3)
-        with c1: st.markdown("### ⚡ Ngắn hạn"); render_list(s.get("short_term",[]),"No short-term recommendation.")
-        with c2: st.markdown("### 🧭 Trung hạn"); render_list(s.get("medium_term",[]),"No medium-term recommendation.")
-        with c3: st.markdown("### 🏗️ Dài hạn"); render_list(s.get("long_term",[]),"No long-term recommendation.")
-    with c: render_evidence(r)
-    with d: render_sql(r)
+        s = r.get("strategy", empty_strategy())
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.markdown("### ⚡ Ngắn hạn")
+            render_list(s.get("short_term", []), "No short-term recommendation.")
+        with c2:
+            st.markdown("### 🧭 Trung hạn")
+            render_list(s.get("medium_term", []), "No medium-term recommendation.")
+        with c3:
+            st.markdown("### 🏗️ Dài hạn")
+            render_list(s.get("long_term", []), "No long-term recommendation.")
+    with c:
+        render_evidence(r)
+    with d:
+        render_sql(r)
 
 def render_message(m):
     with st.chat_message(m["role"]):
-        if m["role"]=="user": st.markdown(m["content"])
-        elif m.get("result"): render_report(m["result"])
-        else: st.markdown(m.get("content",""))
-
-st.title("E-commerce AI Data Analyst")
-st.caption("Analyst → Paradox Hunter → SQL Verification → Final Judge & Strategy • Read-only SQLite")
+        if m["role"] == "user":
+            st.markdown(m["content"])
+        elif m.get("result"):
+            render_report(m["result"])
+        else:
+            st.markdown(m.get("content", ""))
 
 for m in history:
     render_message(m)
 
-question=st.chat_input("Ask a question about the e-commerce data...")
+question = st.chat_input("Ask a question about the e-commerce data...")
 
 if question:
-    with st.chat_message("user"): st.markdown(question)
+    with st.chat_message("user"):
+        st.markdown(question)
     with st.spinner("Agent đang phân tích dữ liệu..."):
-        result=ask_agent(question,history)
+        result = ask_agent(question, history)
 
-    history.append({"role":"user","content":question})
-    history.append({"role":"assistant","content":result["answer"],"result":result})
+    history.append({"role": "user", "content": question})
+    history.append({"role": "assistant", "content": result["answer"], "result": result})
 
-    if current["title"]=="New chat":
-        title=" ".join(question.split())
-        current["title"]=title[:34]+("..." if len(title)>34 else "")
+    if current["title"] == "New chat":
+        title = " ".join(question.split())
+        current["title"] = title[:34] + ("..." if len(title) > 34 else "")
 
     st.rerun()
