@@ -8,3 +8,5 @@ groq
 langchain-google-genai
 sqlalchemy
 pymysql
+langchain-community
+langchain
