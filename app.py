@@ -115,7 +115,7 @@ def llm():
         raise ValueError("⚠️ Vui lòng nhập Gemini API Key trong mục Cấu hình ở thanh bên trái!")
     
     return ChatGoogleGenerativeAI(
-        model="gemini-3.8-flash",
+        model="gemini-3.6-flash",
         google_api_key=api_key,
         temperature=0,
         max_retries=1,
