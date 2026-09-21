@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import sqlite3
@@ -8,9 +9,10 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
+from google.oauth2 import service_account
 from langchain_google_genai import ChatGoogleGenerativeAI
 
-st.set_page_config(page_title="E-commerce AI Data Analyst", page_icon="📊", layout="wide")
+st.set_page_config(page_title="My AI agent", page_icon="🛒", layout="wide")
 
 DB_PATH = Path("data/processed/ecommerce_clean.db").resolve()
 if not DB_PATH.exists():
@@ -79,7 +81,6 @@ def validate_sql(sql):
     if "order_delivered_timestamp" in low and "is not null" not in low:
         warnings.append("Delivery analysis should normally require order_delivered_timestamp IS NOT NULL.")
 
-    # Fatal semantic gate: transformed order_items contains one retained row/order.
     if (
         "order_items" in low
         and (
@@ -109,15 +110,23 @@ def execute_sql(sql, max_rows=80):
     return df.head(max_rows), check
 
 # ---------- LLM ----------
+@st.cache_resource(show_spinner=False)
 def llm():
-    api_key = st.session_state.get("api_key", "")
-    if not api_key:
-        raise ValueError("⚠️ Vui lòng nhập Gemini API Key trong mục Cấu hình ở thanh bên trái!")
-    
+    service_account_info = json.loads(
+        base64.b64decode(st.secrets["GCP_SERVICE_ACCOUNT_JSON_B64"]).decode("utf-8")
+    )
+    credentials = service_account.Credentials.from_service_account_info(
+        service_account_info,
+        scopes=["https://www.googleapis.com/auth/cloud-platform"],
+    )
     return ChatGoogleGenerativeAI(
-        model="gemini-1.5-flash",
-        google_api_key=api_key,
+        model="gemini-3.8-flash",
+        project=st.secrets["GCP_PROJECT_ID"],
+        location=st.secrets.get("GCP_LOCATION", "global"),
+        credentials=credentials,
+        vertexai=True,
         temperature=0,
+        thinking_level="medium",
         max_retries=1,
     )
 
@@ -449,7 +458,7 @@ Use the user's language.
 def workflow_cache_key(question, history):
     context = "|".join(
         f"{m.get('role','')}:{m.get('content','')}"
-        for m in history[-3:]
+        for m in history[-4:]
     )
     raw = f"{question.strip()}||{context}"
     return hashlib.sha256(
@@ -542,7 +551,7 @@ def ask_agent(question, history):
 
     hist = "\n".join(
         f"{m['role']}: {m.get('content','')}"
-        for m in history[-3:]
+        for m in history[-4:]
     )
 
     # Stage 1 — Analyst
@@ -716,9 +725,6 @@ with st.sidebar:
             st.rerun()
     with col2:
         with st.popover("⚙️ Cấu hình", use_container_width=True):
-            st.text_input("Gemini API Key:", type="password", key="api_key")
-            st.markdown("[👉 Lấy API Key tại đây](https://aistudio.google.com/app/apikey)")
-            st.markdown("---")
             st.markdown("**Kết nối MySQL (Tùy chọn)**")
             st.caption("Để trống nếu dùng SQLite mặc định.")
             st.text_input("Host (VD: localhost):", key="db_host")
