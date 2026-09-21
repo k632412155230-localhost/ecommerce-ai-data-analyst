@@ -1,4 +1,3 @@
-import base64
 import json
 import re
 import sqlite3
@@ -9,7 +8,6 @@ from pathlib import Path
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from google.oauth2 import service_account
 from langchain_google_genai import ChatGoogleGenerativeAI
 
 st.set_page_config(page_title="My AI agent", page_icon="🛒", layout="wide")
@@ -109,24 +107,17 @@ def execute_sql(sql, max_rows=80):
         df = pd.read_sql_query(sql, conn)
     return df.head(max_rows), check
 
-# ---------- LLM ----------
-@st.cache_resource(show_spinner=False)
+# ---------- LLM (SỬ DỤNG API KEY TRỰC TIẾP) ----------
 def llm():
-    service_account_info = json.loads(
-        base64.b64decode(st.secrets["GCP_SERVICE_ACCOUNT_JSON_B64"]).decode("utf-8")
-    )
-    credentials = service_account.Credentials.from_service_account_info(
-        service_account_info,
-        scopes=["https://www.googleapis.com/auth/cloud-platform"],
-    )
+    api_key = st.session_state.get("api_key", "")
+    if not api_key:
+        st.error("⚠️ Vui lòng nhập Gemini API Key trong mục ⚙️ Cấu hình ở thanh bên trái!")
+        st.stop()
+        
     return ChatGoogleGenerativeAI(
-        model="gemini-3.8-flash",
-        project=st.secrets["GCP_PROJECT_ID"],
-        location=st.secrets.get("GCP_LOCATION", "global"),
-        credentials=credentials,
-        vertexai=True,
+        model="gemini-3.6-flash",
+        google_api_key=api_key,
         temperature=0,
-        thinking_level="medium",
         max_retries=1,
     )
 
@@ -407,21 +398,14 @@ Tasks:
 1. Give 2-4 basic insights from primary evidence.
 2. Judge every T-test from actual rows.
 3. Report a paradox only if rows directly show a surprising reversal/tension/subgroup exception.
-4. Give short/medium/long strategy.
+4. Give short/medium/long strategy AND Explicitly forecast the future outcomes (Dự báo).
 
 Strategy rules:
 - You MUST distinguish descriptive evidence from business action.
-- Category retained item-price ranking alone does NOT justify more inventory, advertising,
-  expansion, "high demand", or price changes.
-- Payment frequency/value alone does NOT imply customer preference, higher willingness to spend,
-  voucher effectiveness, or justify promotions/cashback/loyalty programs.
+- FORECASTING MANDATE: In SHORT TERM, MEDIUM TERM, and LONG TERM, you MUST format each point into 2 sections: "[Hành động] Đề xuất chiến lược..." và "[Dự báo tương lai] Ước tính cải thiện định lượng dựa trên đà hiện tại...".
+- Category retained item-price ranking alone does NOT justify more inventory, advertising, expansion, "high demand", or price changes.
+- Payment frequency/value alone does NOT imply customer preference, higher willingness to spend, voucher effectiveness.
 - Geographic totals alone do NOT justify expansion or regional marketing.
-- A higher retained payment-value average is only a descriptive association, NOT evidence that
-  the payment method causes customers to spend more.
-- If only one business dimension is available, explicitly say the evidence is too narrow for a
-  broad strategy and focus recommendations on what data to collect/test next.
-- For major commercial action, request missing evidence such as profitability, conversion,
-  stockouts, inventory availability, cost-to-serve, fees, or payment failure rates.
 
 Return exactly:
 
@@ -439,13 +423,16 @@ short answer
 - only verified paradox, or say none verified
 
 ## SHORT TERM
-- ...
+- [Hành động] ...
+  [Dự báo tương lai] ...
 
 ## MEDIUM TERM
-- ...
+- [Hành động] ...
+  [Dự báo tương lai] ...
 
 ## LONG TERM
-- ...
+- [Hành động] ...
+  [Dự báo tương lai] ...
 
 ## LIMITATIONS
 - ...
@@ -665,17 +652,19 @@ def ask_agent(question, history):
     supported = sum(1 for j in report["judgments"] if j["supported"])
     trace["paradox_verification"] += f" | {supported} verified"
 
+    # Default logic for interactive chart trigger
     chart = {"type": "none"}
     if any(w in q for w in ["chart", "graph", "plot", "visual", "visualization", "biểu đồ", "vẽ"]):
         for x in usable:
             df = pd.DataFrame(x["records"])
+            if df.empty: continue
             nums = df.select_dtypes(include="number").columns.tolist()
             cats = [c for c in df.columns if c not in nums]
-            if cats and nums:
+            if nums:
                 chart = {
                     "type": "bar",
-                    "x": cats[0],
-                    "y": nums[0],
+                    "x": cats[0] if cats else nums[0],
+                    "y": nums[0] if (len(nums)==1 or not cats) else (nums[1] if nums[0]==cats[0] else nums[0]),
                     "title": x["title"],
                     "source_id": x["id"],
                 }
@@ -725,8 +714,11 @@ with st.sidebar:
             st.rerun()
     with col2:
         with st.popover("⚙️ Cấu hình", use_container_width=True):
+            st.text_input("Gemini API Key:", type="password", key="api_key")
+            st.markdown("[👉 Lấy API Key tại đây](https://aistudio.google.com/app/apikey)")
+            st.markdown("---")
             st.markdown("**Kết nối MySQL (Tùy chọn)**")
-            st.caption("Để trống nếu dùng SQLite mặc định.")
+            st.caption("Để trống nếu dùng CSDL SQLite mặc định.")
             st.text_input("Host (VD: localhost):", key="db_host")
             st.text_input("Port (VD: 3306):", key="db_port")
             st.text_input("Username (VD: root):", key="db_user")
@@ -775,14 +767,62 @@ def render_audit(r):
         st.markdown(f"- **3. SQL Verification:** {t.get('paradox_verification','UNKNOWN')}")
         st.markdown(f"- **4. Final Judge + Strategist:** {t.get('strategist','UNKNOWN')}")
 
-def render_chart(r):
+def render_chart(r, msg_hash):
     c = r.get("chart", {})
-    if c.get("type") != "bar": return
+    if c.get("type") == "none": return
+    
     for x in r.get("primary_analyses", []):
         if x["id"] == c.get("source_id"):
             df = pd.DataFrame(x["records"])
-            if c["x"] in df.columns and c["y"] in df.columns:
-                st.plotly_chart(px.bar(df, x=c["x"], y=c["y"], title=c.get("title")), use_container_width=True)
+            if df.empty: continue
+            
+            st.markdown("---")
+            st.markdown("### 📊 Interactive Dashboard (Power BI Style)")
+            
+            w_key = f"{msg_hash}_{x['id']}"
+            all_cols = df.columns.tolist()
+            
+            def_x = c.get("x") if c.get("x") in all_cols else all_cols[0]
+            def_y = c.get("y") if c.get("y") in all_cols else all_cols[-1]
+            
+            viz_col, ctrl_col = st.columns([3, 1])
+            
+            with ctrl_col:
+                st.markdown("⚙️ **Visualizations Pane**")
+                c_types = ["bar", "line", "pie", "scatter", "area"]
+                sel_type = st.selectbox("Loại biểu đồ", c_types, index=0, key=f"type_{w_key}")
+                sel_x = st.selectbox("Trục X (Dimension)", all_cols, index=all_cols.index(def_x), key=f"x_{w_key}")
+                sel_y = st.selectbox("Trục Y (Measure)", all_cols, index=all_cols.index(def_y), key=f"y_{w_key}")
+                color_choice = st.selectbox("Phân loại (Legend)", ["None"] + all_cols, key=f"color_{w_key}")
+                show_trend = st.checkbox("📈 Bật đường dự báo (Trendline)", key=f"trend_{w_key}")
+                
+            with viz_col:
+                try:
+                    color_arg = None if color_choice == "None" else color_choice
+                    title = c.get("title", "Data Visualization")
+                    
+                    if sel_type == "scatter":
+                        if show_trend:
+                            try:
+                                fig = px.scatter(df, x=sel_x, y=sel_y, color=color_arg, trendline="ols", title=title)
+                            except Exception:
+                                fig = px.scatter(df, x=sel_x, y=sel_y, color=color_arg, title=title)
+                                st.warning("⚠️ Cần cài đặt thư viện 'statsmodels' (pip install statsmodels) để vẽ đường xu hướng OLS.")
+                        else:
+                            fig = px.scatter(df, x=sel_x, y=sel_y, color=color_arg, title=title)
+                    elif sel_type == "bar":
+                        fig = px.bar(df, x=sel_x, y=sel_y, color=color_arg, title=title)
+                    elif sel_type == "line":
+                        fig = px.line(df, x=sel_x, y=sel_y, color=color_arg, title=title)
+                    elif sel_type == "pie":
+                        fig = px.pie(df, names=sel_x, values=sel_y, title=title)
+                    elif sel_type == "area":
+                        fig = px.area(df, x=sel_x, y=sel_y, color=color_arg, title=title)
+                        
+                    fig.update_layout(margin=dict(l=20, r=20, t=40, b=20), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+                    st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.warning(f"⚠️ Dữ liệu không tương thích. Vui lòng đổi trục X/Y. (Lỗi: {e})")
 
 def render_evidence(r):
     st.markdown("### Primary evidence")
@@ -817,18 +857,18 @@ def render_sql(r):
         st.code(x["sql"], language="sql")
         render_list(x["messages"], "")
 
-def render_report(r):
+def render_report(r, msg_hash):
     if r.get("error"):
         st.error(r["answer"])
         render_audit(r)
         return
     st.success("💡 AI Agent đã hoàn tất: phân tích → tìm nghịch lý → kiểm chứng SQL → chiến lược.")
     render_audit(r)
-    a, b, c, d = st.tabs(["📊 Báo cáo Insight", "💡 Chiến lược", "🧪 Evidence & Paradox Test", "⚙️ SQL"])
+    a, b, c, d = st.tabs(["📊 Báo cáo Insight", "💡 Chiến lược & Dự báo", "🧪 Evidence & Paradox Test", "⚙️ SQL"])
     with a:
         st.markdown("### Kết luận")
         st.markdown(r["answer"])
-        render_chart(r)
+        render_chart(r, msg_hash)
         st.markdown("### 1. Insight cơ bản")
         render_list(r.get("basic_insights", []), "No basic insight produced.")
         st.markdown("### 2. Insight nghịch lý")
@@ -853,24 +893,28 @@ def render_report(r):
     with d:
         render_sql(r)
 
-def render_message(m):
+def render_message(m, idx):
     with st.chat_message(m["role"]):
         if m["role"] == "user":
             st.markdown(m["content"])
         elif m.get("result"):
-            render_report(m["result"])
+            msg_hash = f"chat_{st.session_state.current_chat_id}_msg_{idx}"
+            render_report(m["result"], msg_hash)
         else:
             st.markdown(m.get("content", ""))
 
-for m in history:
-    render_message(m)
+current = st.session_state.chats[st.session_state.current_chat_id]
+history = current["messages"]
 
-question = st.chat_input("Ask a question about the e-commerce data...")
+for idx, m in enumerate(history):
+    render_message(m, idx)
+
+question = st.chat_input("VD: Cho tôi insights về doanh thu và vẽ biểu đồ...")
 
 if question:
     with st.chat_message("user"):
         st.markdown(question)
-    with st.spinner("Agent đang phân tích dữ liệu..."):
+    with st.spinner("Agent đang phân tích và dự báo..."):
         result = ask_agent(question, history)
 
     history.append({"role": "user", "content": question})
