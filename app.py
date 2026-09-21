@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import sqlite3
@@ -107,7 +108,7 @@ def execute_sql(sql, max_rows=80):
         df = pd.read_sql_query(sql, conn)
     return df.head(max_rows), check
 
-# ---------- LLM (SỬ DỤNG API KEY TRỰC TIẾP) ----------
+# ---------- LLM ----------
 def llm():
     api_key = st.session_state.get("api_key", "")
     if not api_key:
@@ -486,46 +487,6 @@ def err_result(message, trace, primary=None, tests=None):
 
 def ask_agent(question, history):
     q = question.lower()
-
-    if (
-        ("revenue" in q or "doanh thu" in q)
-        and not any(
-            x in q
-            for x in [
-                "sum(price)",
-                "sum(payment_value)",
-                "theo price",
-                "theo payment_value",
-                "using price",
-                "using payment_value",
-            ]
-        )
-    ):
-        return {
-            "answer": (
-                "Revenue/doanh thu chưa có một định nghĩa duy nhất. "
-                "Hãy chọn **SUM(price)** (retained item-price total) hoặc "
-                "**SUM(payment_value)** (retained payment-value total)."
-            ),
-            "basic_insights": [],
-            "paradoxical_insights": [],
-            "strategy": empty_strategy(),
-            "limitations": [
-                "Neither metric is guaranteed complete original-order revenue."
-            ],
-            "judgments": [],
-            "primary_analyses": [],
-            "paradox_candidates": [],
-            "stage_trace": {
-                "analyst": "NOT RUN",
-                "paradox_hunter": "NOT RUN",
-                "paradox_verification": "NOT RUN",
-                "strategist": "NOT RUN",
-            },
-            "chart": {"type": "none"},
-            "error": False,
-        }
-
     trace = {
         "analyst": "PENDING",
         "paradox_hunter": "PENDING",
