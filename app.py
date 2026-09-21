@@ -1,4 +1,3 @@
-import base64
 import json
 import re
 import sqlite3
@@ -108,7 +107,7 @@ def execute_sql(sql, max_rows=80):
         df = pd.read_sql_query(sql, conn)
     return df.head(max_rows), check
 
-# ---------- LLM ----------
+# ---------- LLM (CHUẨN GEMINI 3.6 FLASH + API KEY) ----------
 def llm():
     api_key = st.session_state.get("api_key", "")
     if not api_key:
@@ -446,7 +445,7 @@ Use the user's language.
 def workflow_cache_key(question, history):
     context = "|".join(
         f"{m.get('role','')}:{m.get('content','')}"
-        for m in history[-4:]
+        for m in history[-3:]
     )
     raw = f"{question.strip()}||{context}"
     return hashlib.sha256(
@@ -487,6 +486,7 @@ def err_result(message, trace, primary=None, tests=None):
 
 def ask_agent(question, history):
     q = question.lower()
+    
     trace = {
         "analyst": "PENDING",
         "paradox_hunter": "PENDING",
@@ -499,7 +499,7 @@ def ask_agent(question, history):
 
     hist = "\n".join(
         f"{m['role']}: {m.get('content','')}"
-        for m in history[-4:]
+        for m in history[-3:]
     )
 
     # Stage 1 — Analyst
