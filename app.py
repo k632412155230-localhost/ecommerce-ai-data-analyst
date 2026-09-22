@@ -109,7 +109,7 @@ def llm():
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )
     return ChatGoogleGenerativeAI(
-        model=st.secrets.get("GEMINI_MODEL", "gemini-1.5-flash"),
+        model=st.secrets.get("GEMINI_MODEL", "gemini-3.8-flash"),
         project=st.secrets.get("GCP_PROJECT_ID"),
         location=st.secrets.get("GCP_LOCATION", "global"),
         credentials=credentials,
