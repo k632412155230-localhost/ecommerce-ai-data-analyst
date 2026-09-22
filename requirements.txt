@@ -3,10 +3,4 @@ pandas
 plotly
 pydantic
 langchain
-langchain-groq
-groq
-langchain-google-genai
-sqlalchemy
-pymysql
-langchain-community
-langchain
+langchain-google-genai>=4.0.0
