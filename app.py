@@ -363,7 +363,7 @@ def execute_plan(plan):
         })
     return out
 
-# ---------- Stage 3 ----------
+# ---------- Stage 3 (CẬP NHẬT LUẬT CHỐNG ẢO CHO INSIGHT) ----------
 def final_report(question, primary, tests):
     p = [{"id": x["id"], "title": x["title"], "rows": x["records"][:8]} for x in primary if x["records"]]
     t = [{"id": x["id"], "title": x["title"], "rows": x["records"][:15]} for x in tests if x["records"]]
@@ -383,13 +383,14 @@ PARADOX TEST RESULTS:
 {SEMANTICS}
 
 Tasks:
-1. Give 2-4 basic insights from primary evidence.
+1. Give 2-4 basic insights from primary evidence. (FACTS ONLY. NO recommendations or solutions here).
 2. Judge every T-test from actual rows.
-3. Report a paradox only if rows directly show a surprising reversal/tension/subgroup exception.
-4. Give short/medium/long strategy.
+3. Report a paradox only if rows directly show a surprising reversal/tension/subgroup exception. (FACTS ONLY. NO solutions here).
+4. Give short/medium/long strategy. (ALL action plans, solutions, and recommendations go here).
 5. For EACH strategy horizon, give an evidence-grounded future outlook on whether improvement is plausible.
 
-Strategy outlook rules:
+Strategy rules:
+- STRICT SEPARATION: 'BASIC INSIGHTS' and 'PARADOXICAL INSIGHTS' sections must contain ONLY descriptive findings from the data. ABSOLUTELY NO recommendations, solutions, "should", "need to", or action verbs in these sections. Save ALL actions for the SHORT/MEDIUM/LONG TERM sections.
 - Treat the outlook as a scenario assessment, NOT a causal estimate of the strategy's effect.
 - Never invent numeric effect sizes, probabilities, ROI, or growth rates that are not directly supported by evidence.
 - If current evidence cannot support a directional forecast, use UNCERTAIN rather than guessing.
@@ -399,7 +400,7 @@ Strategy outlook rules:
   - CONFIDENCE: LOW | MEDIUM | HIGH — one short reason
 - Short term roughly means the next 1-3 months, medium term 3-12 months, and long term beyond 12 months unless the user's question clearly implies another horizon.
 
-Strategy rules:
+Strategy rules (continued):
 - You MUST distinguish descriptive evidence from business action.
 - Category retained item-price ranking alone does NOT justify more inventory, advertising, expansion, "high demand", or price changes.
 - Payment frequency/value alone does NOT imply customer preference, higher willingness to spend, voucher effectiveness, or justify promotions/cashback/loyalty programs.
