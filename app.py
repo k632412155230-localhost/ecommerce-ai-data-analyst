@@ -741,76 +741,79 @@ def render_interactive_dashboard(r, key_prefix):
     source_ids = [item["id"] for item, _ in frames]
     source_lookup = {item["id"]: (item, df) for item, df in frames}
 
-    selected_id = st.selectbox(
-        "Nguồn evidence",
-        source_ids,
-        format_func=lambda sid: f"{sid} — {source_lookup[sid][0]['title']}",
-        key=f"{key_prefix}_viz_source"
-    )
-    item, df = source_lookup[selected_id]
+    col_graph, col_controls = st.columns([3, 1])
 
-    numeric_cols = df.select_dtypes(include="number").columns.tolist()
-    if not numeric_cols:
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.info("Bảng này không có cột số nên chỉ hiển thị dạng bảng.")
-        return
+    with col_controls:
+        st.markdown("**⚙️ Bảng điều khiển**")
+        selected_id = st.selectbox(
+            "Nguồn evidence",
+            source_ids,
+            format_func=lambda sid: f"{sid} — {source_lookup[sid][0]['title']}",
+            key=f"{key_prefix}_viz_source"
+        )
+        item, df = source_lookup[selected_id]
 
-    all_cols = df.columns.tolist()
-    categorical_cols = [c for c in all_cols if c not in numeric_cols]
-    default_x = categorical_cols[0] if categorical_cols else all_cols[0]
-
-    c1, c2, c3, c4 = st.columns([1.05, 1.25, 1.25, 0.9])
-    with c1:
-        chart_type = st.selectbox("Kiểu biểu đồ", ["Bar", "Line", "Scatter", "Area", "Table"], key=f"{key_prefix}_viz_type")
-    with c2:
-        x_col = st.selectbox("Trục X", all_cols, index=all_cols.index(default_x), key=f"{key_prefix}_viz_x")
-    with c3:
-        y_col = st.selectbox("Trục Y", numeric_cols, key=f"{key_prefix}_viz_y")
-    with c4:
-        top_n = st.number_input("Top N", min_value=3, max_value=max(3, min(80, len(df))), value=min(15, max(3, len(df))), step=1, key=f"{key_prefix}_viz_topn")
-
-    f1, f2 = st.columns([1.3, 1])
-    with f1:
-        sort_mode = st.selectbox("Sắp xếp theo Y", ["Không sắp xếp", "Cao → thấp", "Thấp → cao"], key=f"{key_prefix}_viz_sort")
-    with f2:
-        show_table = st.checkbox("Hiện bảng dữ liệu", value=False, key=f"{key_prefix}_viz_table_toggle")
-
-    plot_df = df.copy()
-    if x_col not in numeric_cols:
-        values = [v for v in plot_df[x_col].dropna().astype(str).unique().tolist()]
-        if 1 < len(values) <= 60:
-            chosen = st.multiselect(f"Lọc {x_col}", values, default=[], placeholder="Để trống = giữ tất cả", key=f"{key_prefix}_viz_filter")
-            if chosen:
-                plot_df = plot_df[plot_df[x_col].astype(str).isin(chosen)]
-
-    if sort_mode == "Cao → thấp":
-        plot_df = plot_df.sort_values(y_col, ascending=False)
-    elif sort_mode == "Thấp → cao":
-        plot_df = plot_df.sort_values(y_col, ascending=True)
-
-    plot_df = plot_df.head(int(top_n))
-    if plot_df.empty:
-        st.warning("Bộ lọc hiện tại không còn quan sát nào để vẽ.")
-        return
-
-    title = f"{item['id']} — {item['title']}"
-    if chart_type == "Table":
-        st.dataframe(plot_df, use_container_width=True, hide_index=True)
-    else:
-        if chart_type == "Bar":
-            fig = px.bar(plot_df, x=x_col, y=y_col, title=title)
-        elif chart_type == "Line":
-            fig = px.line(plot_df, x=x_col, y=y_col, markers=True, title=title)
-        elif chart_type == "Scatter":
-            fig = px.scatter(plot_df, x=x_col, y=y_col, title=title)
+        numeric_cols = df.select_dtypes(include="number").columns.tolist()
+        
+        if not numeric_cols:
+            st.warning("Bảng này không có cột số.")
+            plot_df = df.copy()
+            chart_type = "Table"
+            show_table = False
         else:
-            fig = px.area(plot_df, x=x_col, y=y_col, title=title)
+            all_cols = df.columns.tolist()
+            categorical_cols = [c for c in all_cols if c not in numeric_cols]
+            default_x = categorical_cols[0] if categorical_cols else all_cols[0]
+            
+            chart_type = st.selectbox("Kiểu biểu đồ", ["Bar", "Line", "Scatter", "Area", "Table"], key=f"{key_prefix}_viz_type")
+            x_col = st.selectbox("Trục X", all_cols, index=all_cols.index(default_x), key=f"{key_prefix}_viz_x")
+            y_col = st.selectbox("Trục Y", numeric_cols, key=f"{key_prefix}_viz_y")
+            top_n = st.number_input("Top N", min_value=3, max_value=max(3, min(80, len(df))), value=min(15, max(3, len(df))), step=1, key=f"{key_prefix}_viz_topn")
+            sort_mode = st.selectbox("Sắp xếp theo Y", ["Không sắp xếp", "Cao → thấp", "Thấp → cao"], key=f"{key_prefix}_viz_sort")
+            show_table = st.checkbox("Hiện bảng dữ liệu", value=False, key=f"{key_prefix}_viz_table_toggle")
 
-        fig.update_layout(hovermode="closest", margin=dict(l=20, r=20, t=55, b=20))
-        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["drawline", "drawrect", "eraseshape"]})
+            plot_df = df.copy()
+            if x_col not in numeric_cols:
+                values = [v for v in plot_df[x_col].dropna().astype(str).unique().tolist()]
+                if 1 < len(values) <= 60:
+                    chosen = st.multiselect(f"Lọc {x_col}", values, default=[], placeholder="Để trống = giữ tất cả", key=f"{key_prefix}_viz_filter")
+                    if chosen:
+                        plot_df = plot_df[plot_df[x_col].astype(str).isin(chosen)]
 
-    if show_table and chart_type != "Table":
-        st.dataframe(plot_df, use_container_width=True, hide_index=True)
+            if sort_mode == "Cao → thấp":
+                plot_df = plot_df.sort_values(y_col, ascending=False)
+            elif sort_mode == "Thấp → cao":
+                plot_df = plot_df.sort_values(y_col, ascending=True)
+
+            plot_df = plot_df.head(int(top_n))
+
+    with col_graph:
+        if not numeric_cols:
+            st.dataframe(plot_df, use_container_width=True, hide_index=True)
+            return
+
+        if plot_df.empty:
+            st.warning("Bộ lọc hiện tại không còn quan sát nào để vẽ.")
+            return
+
+        title = f"{item['id']} — {item['title']}"
+        if chart_type == "Table":
+            st.dataframe(plot_df, use_container_width=True, hide_index=True)
+        else:
+            if chart_type == "Bar":
+                fig = px.bar(plot_df, x=x_col, y=y_col, title=title)
+            elif chart_type == "Line":
+                fig = px.line(plot_df, x=x_col, y=y_col, markers=True, title=title)
+            elif chart_type == "Scatter":
+                fig = px.scatter(plot_df, x=x_col, y=y_col, title=title)
+            else:
+                fig = px.area(plot_df, x=x_col, y=y_col, title=title)
+
+            fig.update_layout(hovermode="closest", margin=dict(l=20, r=20, t=55, b=20))
+            st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True, "modeBarButtonsToAdd": ["drawline", "drawrect", "eraseshape"]})
+
+        if show_table and chart_type != "Table":
+            st.dataframe(plot_df, use_container_width=True, hide_index=True)
 
 @st.cache_data(show_spinner=False)
 def monthly_operational_kpis():
