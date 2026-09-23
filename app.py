@@ -147,7 +147,7 @@ def sql_blocks(text):
 
 def parse_plan(text, prefix, limit):
     blocks = sql_blocks(text)
-    heads = re.findall(rf"^##\s*({prefix}\d+)\s*\|\s*(.+?)\s*$", text, flags=re.M|re.I)
+    heads = re.findall(rf"^#{{2,4}}\s*({prefix}\d+)\s*\|\s*(.+?)\s*$", text, flags=re.M|re.I)
     out = []
     for i, sql in enumerate(blocks[:limit], 1):
         ident, title = heads[i-1] if i <= len(heads) else (f"{prefix}{i}", f"Analysis {i}")
@@ -161,12 +161,13 @@ HEADINGS = [
 ]
 
 def get_section(text, heading):
-    pat = rf"^##\s*{re.escape(heading)}\s*$\s*(.*?)(?=^##\s*(?:{'|'.join(map(re.escape,HEADINGS))})\s*$|\Z)"
+    # Regex xịn hơn: Chấp nhận cả 2 đến 4 dấu thăng (##, ###, ####) để chống vỡ khung
+    pat = rf"^#{{2,4}}\s*{re.escape(heading)}\s*$\s*(.*?)(?=^#{{2,4}}\s*(?:{'|'.join(map(re.escape,HEADINGS))})\s*$|\Z)"
     m = re.search(pat, text, flags=re.S|re.M|re.I)
     return m.group(1).strip() if m else ""
 
 def bullets(text):
-    return [x.strip() for x in re.findall(r"^\s*[-*]\s+(.+?)\s*$", text, flags=re.M) if x.strip()]
+    return [x.strip() for x in re.findall(r"^\s*[-*+]\s+(.+?)\s*$", text, flags=re.M) if x.strip()]
 
 def parse_final(text):
     ans = get_section(text, "CONCLUSION") or text.strip()
@@ -363,7 +364,7 @@ def execute_plan(plan):
         })
     return out
 
-# ---------- Stage 3 (CẬP NHẬT LUẬT CHỐNG ẢO CHO INSIGHT) ----------
+# ---------- Stage 3 (Cập nhật Khóa Chặt Bệnh Lười LLM) ----------
 def final_report(question, primary, tests):
     p = [{"id": x["id"], "title": x["title"], "rows": x["records"][:8]} for x in primary if x["records"]]
     t = [{"id": x["id"], "title": x["title"], "rows": x["records"][:15]} for x in tests if x["records"]]
@@ -382,74 +383,54 @@ PARADOX TEST RESULTS:
 
 {SEMANTICS}
 
-Tasks:
-1. Give 2-4 basic insights from primary evidence. (FACTS ONLY. NO recommendations or solutions here).
-2. Judge every T-test from actual rows.
-3. Report a paradox only if rows directly show a surprising reversal/tension/subgroup exception. (FACTS ONLY. NO solutions here).
-4. Give short/medium/long strategy. (ALL action plans, solutions, and recommendations go here).
-5. For EACH strategy horizon, give an evidence-grounded future outlook on whether improvement is plausible.
+CRITICAL INSTRUCTIONS FOR OUTPUT GENERATION:
+1. MANDATORY STRATEGY SECTIONS: Even if the user ONLY asked for "insights" or "số liệu", you MUST STILL proactively generate at least 1-2 actionable business solutions for EVERY time horizon (SHORT TERM, MEDIUM TERM, LONG TERM). NEVER leave them empty.
+2. FACTS ONLY IN INSIGHTS: 'BASIC INSIGHTS' and 'PARADOXICAL INSIGHTS' must contain ONLY descriptive facts from the data. CẤM TUYỆT ĐỐI (STRICTLY FORBIDDEN) to write solutions, advice, or action verbs like "cần", "nên", "đề xuất", "giải pháp" in these sections.
+3. ALL SOLUTIONS GO TO STRATEGY: Every single action plan or recommendation MUST be written under the SHORT TERM, MEDIUM TERM, or LONG TERM headers.
+4. OUTLOOKS: For each horizon, provide exactly these 3 bullets: OUTLOOK, KPI, CONFIDENCE. Treat the outlook as a scenario assessment, not a causal guarantee.
 
-Strategy rules:
-- STRICT SEPARATION: 'BASIC INSIGHTS' and 'PARADOXICAL INSIGHTS' sections must contain ONLY descriptive findings from the data. ABSOLUTELY NO recommendations, solutions, "should", "need to", or action verbs in these sections. Save ALL actions for the SHORT/MEDIUM/LONG TERM sections.
-- Treat the outlook as a scenario assessment, NOT a causal estimate of the strategy's effect.
-- Never invent numeric effect sizes, probabilities, ROI, or growth rates that are not directly supported by evidence.
-- If current evidence cannot support a directional forecast, use UNCERTAIN rather than guessing.
-- Each outlook section must contain exactly these three bullets:
-  - OUTLOOK: IMPROVE | MIXED | UNCERTAIN | WORSEN — one short reason
-  - KPI: the most relevant measurable KPI to monitor
-  - CONFIDENCE: LOW | MEDIUM | HIGH — one short reason
-- Short term roughly means the next 1-3 months, medium term 3-12 months, and long term beyond 12 months unless the user's question clearly implies another horizon.
-
-Strategy rules (continued):
-- You MUST distinguish descriptive evidence from business action.
-- Category retained item-price ranking alone does NOT justify more inventory, advertising, expansion, "high demand", or price changes.
-- Payment frequency/value alone does NOT imply customer preference, higher willingness to spend, voucher effectiveness, or justify promotions/cashback/loyalty programs.
-- Geographic totals alone do NOT justify expansion or regional marketing.
-- A higher retained payment-value average is only a descriptive association, NOT evidence that the payment method causes customers to spend more.
-- If only one business dimension is available, explicitly say the evidence is too narrow for a broad strategy and focus recommendations on what data to collect/test next.
-- For major commercial action, request missing evidence such as profitability, conversion, stockouts, inventory availability, cost-to-serve, fees, or payment failure rates.
-
-Return exactly:
+Return EXACTLY this format with EXACTLY these headers (Use exactly two hash marks `## `):
 
 ## CONCLUSION
-short answer
+[Short summary of findings]
 
 ## BASIC INSIGHTS
-- ...
+- [Fact 1]
+- [Fact 2]
 
 ## TEST JUDGMENTS
 - [T1] SUPPORTED: ...
 - [T2] NOT SUPPORTED: ...
 
 ## PARADOXICAL INSIGHTS
-- only verified paradox, or say none verified
+- [Fact 3 or "Không có insight nghịch lý đủ chắc được xác minh trong lượt này."]
 
 ## SHORT TERM
-- ...
+- [Actionable solution 1]
 
 ## SHORT TERM OUTLOOK
-- OUTLOOK: IMPROVE | MIXED | UNCERTAIN | WORSEN — ...
-- KPI: ...
-- CONFIDENCE: LOW | MEDIUM | HIGH — ...
+- OUTLOOK: IMPROVE | MIXED | UNCERTAIN | WORSEN — [reason]
+- KPI: [kpi name]
+- CONFIDENCE: LOW | MEDIUM | HIGH — [reason]
 
 ## MEDIUM TERM
-- ...
+- [Actionable solution 2]
 
 ## MEDIUM TERM OUTLOOK
-- OUTLOOK: IMPROVE | MIXED | UNCERTAIN | WORSEN — ...
-- KPI: ...
-- CONFIDENCE: LOW | MEDIUM | HIGH — ...
+- OUTLOOK: IMPROVE | MIXED | UNCERTAIN | WORSEN — [reason]
+- KPI: [kpi name]
+- CONFIDENCE: LOW | MEDIUM | HIGH — [reason]
 
 ## LONG TERM
-- ...
+- [Actionable solution 3]
 
 ## LONG TERM OUTLOOK
-- OUTLOOK: IMPROVE | MIXED | UNCERTAIN | WORSEN — ...
-- KPI: ...
-- CONFIDENCE: LOW | MEDIUM | HIGH — ...
+- OUTLOOK: IMPROVE | MIXED | UNCERTAIN | WORSEN — [reason]
+- KPI: [kpi name]
+- CONFIDENCE: LOW | MEDIUM | HIGH — [reason]
 
 ## LIMITATIONS
-- ...
+- [Limitation or data gap]
 
 Use the user's language.
 """
