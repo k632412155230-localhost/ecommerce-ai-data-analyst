@@ -14,6 +14,36 @@ from langchain_core.messages import HumanMessage
 
 st.set_page_config(page_title="My AI agent", page_icon="🛒", layout="wide")
 
+# ==========================================
+# ---------- SECURITY LOGIN KHÓA APP -------
+# ==========================================
+def check_password():
+    """Kiểm tra mật khẩu để khóa toàn bộ ứng dụng."""
+    if "password_correct" not in st.session_state:
+        st.session_state["password_correct"] = False
+
+    if not st.session_state["password_correct"]:
+        col1, col2, col3 = st.columns([1, 2, 1])
+        with col2:
+            st.markdown("<br><br><br>", unsafe_allow_html=True)
+            st.markdown("<h2 style='text-align: center;'>🔒 HỆ THỐNG PHÂN TÍCH AI</h2>", unsafe_allow_html=True)
+            st.markdown("<p style='text-align: center;'>Vui lòng nhập mật khẩu để tiếp tục</p>", unsafe_allow_html=True)
+            pwd = st.text_input("Mật khẩu", type="password", label_visibility="collapsed", placeholder="Nhập mật khẩu...")
+            
+            if pwd:
+                if pwd == "lamineyamal":
+                    st.session_state["password_correct"] = True
+                    st.rerun()
+                else:
+                    st.error("🚫 Sai mật khẩu. Vui lòng thử lại!")
+        return False
+    return True
+
+if not check_password():
+    st.stop() # Dừng chạy toàn bộ code bên dưới nếu chưa nhập đúng pass
+# ==========================================
+
+
 DB_PATH = Path("data/processed/ecommerce_clean.db").resolve()
 if not DB_PATH.exists():
     st.error(f"Database not found: {DB_PATH}")
@@ -161,7 +191,6 @@ HEADINGS = [
 ]
 
 def get_section(text, heading):
-    # Regex xịn hơn: Chấp nhận cả 2 đến 4 dấu thăng (##, ###, ####) để chống vỡ khung
     pat = rf"^#{{2,4}}\s*{re.escape(heading)}\s*$\s*(.*?)(?=^#{{2,4}}\s*(?:{'|'.join(map(re.escape,HEADINGS))})\s*$|\Z)"
     m = re.search(pat, text, flags=re.S|re.M|re.I)
     return m.group(1).strip() if m else ""
@@ -364,7 +393,7 @@ def execute_plan(plan):
         })
     return out
 
-# ---------- Stage 3 (Cập nhật Khóa Chặt Bệnh Lười LLM) ----------
+# ---------- Stage 3 ----------
 def final_report(question, primary, tests):
     p = [{"id": x["id"], "title": x["title"], "rows": x["records"][:8]} for x in primary if x["records"]]
     t = [{"id": x["id"], "title": x["title"], "rows": x["records"][:15]} for x in tests if x["records"]]
